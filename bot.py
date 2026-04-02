@@ -124,6 +124,7 @@ def market_buy(client, pair, usdt):
 
     return client.create_order(order), price, amount
 
+
 def market_sell(client, pair, amount):
     order = gate_api.Order(
         currency_pair=pair,
