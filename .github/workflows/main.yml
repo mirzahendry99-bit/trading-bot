@@ -13,9 +13,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repo
+      # Checkout repo (FIXED)
       - uses: actions/checkout@v3
         with:
+          fetch-depth: 0
           persist-credentials: true
 
       # Setup Python
@@ -28,6 +29,12 @@ jobs:
       - name: Install dependencies
         run: pip install gate-api pandas numpy
 
+      # DEBUG VERSION (WAJIB)
+      - name: Debug file
+        run: |
+          echo "=== FILE CONTENT CHECK ==="
+          head -20 bot.py
+
       # Run bot
       - name: Run bot
         env:
@@ -35,14 +42,12 @@ jobs:
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
         run: python bot.py
 
-      # Save position (ANTI ERROR VERSION)
+      # Save position
       - name: Save position
         run: |
           git config --global user.name "bot"
           git config --global user.email "bot@example.com"
-
           git pull origin main --rebase || true
-
           git add position.json || true
           git commit -m "update position" || true
           git push || true
