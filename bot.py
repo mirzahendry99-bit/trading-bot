@@ -3,15 +3,15 @@ import time
 import gate_api
 from gate_api.exceptions import ApiException
 
-# Konfigurasi
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
 
-# Setting trading
-SYMBOL = "BTC_USDT"
-GRID_LEVELS = 5
-GRID_SPACING = 0.01
-ORDER_SIZE = 10
+# Setting
+PROFIT_TARGET = 0.02      # Target profit 2%
+STOP_LOSS = 0.015         # Stop loss 1.5%
+ORDER_USDT = 10           # Modal per trade (USDT)
+TOP_COINS = 30            # Scan 30 koin teratas
+MIN_VOLUME = 1000000      # Minimum volume 24 jam
 
 def setup_client():
     config = gate_api.Configuration(
@@ -21,46 +21,109 @@ def setup_client():
     )
     return gate_api.SpotApi(gate_api.ApiClient(config))
 
-def get_current_price(client, symbol):
-    tickers = client.list_tickers(currency_pair=symbol)
-    return float(tickers[0].last)
+def get_hot_coins(client):
+    """Scan dan filter koin yang potensial"""
+    tickers = client.list_tickers()
+    candidates = []
+    
+    for ticker in tickers:
+        try:
+            # Filter hanya pair USDT
+            if not ticker.currency_pair.endswith('_USDT'):
+                continue
+            
+            volume = float(ticker.quote_volume or 0)
+            change = float(ticker.change_percentage or 0)
+            price = float(ticker.last or 0)
+            
+            # Filter: volume tinggi + harga naik 1-8%
+            if volume > MIN_VOLUME and 1 < change < 8 and price > 0:
+                candidates.append({
+                    'pair': ticker.currency_pair,
+                    'price': price,
+                    'change': change,
+                    'volume': volume
+                })
+        except:
+            continue
+    
+    # Sort by volume tertinggi
+    candidates.sort(key=lambda x: x['volume'], reverse=True)
+    return candidates[:5]  # Ambil 5 terbaik
 
-def place_order(client, symbol, side, price, amount):
+def place_buy_order(client, pair, price, usdt_amount):
+    amount = round(usdt_amount / price, 6)
     order = gate_api.Order(
-        currency_pair=symbol,
-        type="limit",
-        side=side,
-        price=str(price),
+        currency_pair=pair,
+        type="market",
+        side="buy",
         amount=str(amount)
     )
     return client.create_order(order)
 
-def run_grid_bot():
+def place_sell_order(client, pair, amount):
+    order = gate_api.Order(
+        currency_pair=pair,
+        type="market",
+        side="sell",
+        amount=str(amount)
+    )
+    return client.create_order(order)
+
+def run_smart_bot():
     client = setup_client()
-    print("Bot started...")
-    base_price = get_current_price(client, SYMBOL)
-    print(f"Base price: {base_price}")
-    grid_prices = []
-    for i in range(-GRID_LEVELS, GRID_LEVELS + 1):
-        grid_prices.append(base_price * (1 + i * GRID_SPACING))
-    print(f"Grid levels: {[round(p, 2) for p in grid_prices]}")
-    while True:
-        try:
-            current_price = get_current_price(client, SYMBOL)
-            print(f"Current price: {current_price}")
-            for grid_price in grid_prices:
-                if current_price <= grid_price * 0.995:
-                    amount = ORDER_SIZE / grid_price
-                    place_order(client, SYMBOL, "buy", grid_price, round(amount, 6))
-                    print(f"Buy order placed at {grid_price}")
-                elif current_price >= grid_price * 1.005:
-                    amount = ORDER_SIZE / grid_price
-                    place_order(client, SYMBOL, "sell", grid_price, round(amount, 6))
-                    print(f"Sell order placed at {grid_price}")
+    print("Smart Scanning Bot started...")
+    print(f"Scanning top coins...")
+    
+    hot_coins = get_hot_coins(client)
+    
+    if not hot_coins:
+        print("Tidak ada koin yang memenuhi kriteria saat ini.")
+        return
+    
+    print(f"Ditemukan {len(hot_coins)} koin potensial:")
+    for coin in hot_coins:
+        print(f"  {coin['pair']} | Harga: {coin['price']} | Naik: {coin['change']}% | Volume: {coin['volume']:.0f}")
+    
+    # Trade koin terbaik
+    best = hot_coins[0]
+    pair = best['pair']
+    buy_price = best['price']
+    
+    print(f"\nMemilih: {pair} untuk di-trade")
+    
+    try:
+        # Beli
+        buy_order = place_buy_order(client, pair, buy_price, ORDER_USDT)
+        amount_bought = float(buy_order.amount)
+        print(f"Beli {pair}: {amount_bought} @ {buy_price}")
+        
+        # Monitor harga
+        target_price = buy_price * (1 + PROFIT_TARGET)
+        stop_price = buy_price * (1 - STOP_LOSS)
+        print(f"Target jual: {target_price:.4f}")
+        print(f"Stop loss: {stop_price:.4f}")
+        
+        while True:
             time.sleep(30)
-        except ApiException as e:
-            print(f"Error: {e}")
-            time.sleep(60)
+            tickers = client.list_tickers(currency_pair=pair)
+            current_price = float(tickers[0].last)
+            print(f"Harga {pair} sekarang: {current_price}")
+            
+            if current_price >= target_price:
+                place_sell_order(client, pair, amount_bought)
+                profit = (current_price - buy_price) * amount_bought
+                print(f"PROFIT! Jual {pair} @ {current_price} | Untung: ${profit:.2f}")
+                break
+            
+            elif current_price <= stop_price:
+                place_sell_order(client, pair, amount_bought)
+                loss = (buy_price - current_price) * amount_bought
+                print(f"STOP LOSS! Jual {pair} @ {current_price} | Rugi: ${loss:.2f}")
+                break
+                
+    except ApiException as e:
+        print(f"Error trade: {e}")
 
 if __name__ == "__main__":
-    run_grid_bot()
+    run_smart_bot()
