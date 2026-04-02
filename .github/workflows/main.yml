@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # Install dependencies (UPGRADE DI SINI)
+      # Install dependencies
       - name: Install dependencies
         run: pip install gate-api pandas numpy
 
@@ -35,11 +35,14 @@ jobs:
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
         run: python bot.py
 
-      # Save posisi (WAJIB untuk auto sell)
+      # Save position (ANTI ERROR VERSION)
       - name: Save position
         run: |
           git config --global user.name "bot"
           git config --global user.email "bot@example.com"
+
+          git pull origin main --rebase || true
+
           git add position.json || true
           git commit -m "update position" || true
-          git push
+          git push || true
