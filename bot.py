@@ -4,6 +4,8 @@ import gate_api
 import pandas as pd
 import numpy as np
 
+print("🚀 BOT V5 FINAL RUNNING")
+
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
 
@@ -110,7 +112,7 @@ def find_best(client):
 
     return best_pair, best_price, best_score
 
-# 🔥 FIX UTAMA ADA DI SINI
+# ✅ MARKET ORDER ONLY (NO BUG)
 def market_buy(client, pair, usdt):
     price = float(client.list_tickers(currency_pair=pair)[0].last)
     amount = round((usdt * 0.97) / price, 6)
@@ -124,7 +126,6 @@ def market_buy(client, pair, usdt):
 
     return client.create_order(order), price, amount
 
-
 def market_sell(client, pair, amount):
     order = gate_api.Order(
         currency_pair=pair,
@@ -137,20 +138,23 @@ def market_sell(client, pair, amount):
 
 def run_bot():
     client = setup_client()
-    print("=== BOT FINAL CLEAN START ===")
+
+    print("=== ENGINE START ===")
 
     if not market_ok(client):
-        print("Market not safe")
+        print("❌ Market risk-off, skip")
         return
 
     balance = get_balance(client)
-    print(f"Balance: {balance}")
+    print(f"💰 Balance: {balance}")
 
     if balance < 5:
+        print("❌ Balance too small")
         return
 
     position = load_position()
 
+    # ================= HOLD MODE =================
     if position:
         pair = position["pair"]
         buy_price = position["buy_price"]
@@ -164,16 +168,16 @@ def run_bot():
         sl = buy_price * (1 - STOP_LOSS)
         trailing = peak * (1 - TRAILING_GAP)
 
-        print(f"HOLD {pair} {current_price}")
+        print(f"📊 HOLD {pair} | Price: {current_price}")
 
         if current_price >= tp:
             market_sell(client, pair, amount)
-            print("TAKE PROFIT")
+            print("🚀 TAKE PROFIT")
             clear_position()
 
         elif current_price <= sl or current_price <= trailing:
             market_sell(client, pair, amount)
-            print("STOP LOSS")
+            print("❌ STOP LOSS")
             clear_position()
 
         else:
@@ -182,14 +186,15 @@ def run_bot():
 
         return
 
+    # ================= ENTRY MODE =================
     pair, price, score = find_best(client)
 
-    if not pair or score < 3:
-        print("No signal")
+    if not pair or score < 4:
+        print("❌ No valid signal")
         return
 
     usdt = balance * 0.7
-    print(f"ENTRY {pair} score:{score}")
+    print(f"🔥 ENTRY {pair} | Score: {score}")
 
     try:
         order, buy_price, amount = market_buy(client, pair, usdt)
@@ -201,10 +206,10 @@ def run_bot():
             "peak_price": buy_price
         })
 
-        print(f"BOUGHT {pair} @ {buy_price}")
+        print(f"✅ BOUGHT {pair} @ {buy_price}")
 
     except Exception as e:
-        print(f"Trade error: {e}")
+        print(f"❌ Trade error: {e}")
 
 if __name__ == "__main__":
     run_bot()
