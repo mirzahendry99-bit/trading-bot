@@ -55,18 +55,22 @@ def place_buy_order(client, pair, price, usdt_amount):
     amount = round(usdt_amount / price, 6)
     order = gate_api.Order(
         currency_pair=pair,
-        type="market",
+        type="limit",
         side="buy",
-        amount=str(amount)
+        price=str(price),
+        amount=str(amount),
+        time_in_force="gtc"
     )
     return client.create_order(order)
 
-def place_sell_order(client, pair, amount):
+def place_sell_order(client, pair, price, amount):
     order = gate_api.Order(
         currency_pair=pair,
-        type="market",
+        type="limit",
         side="sell",
-        amount=str(amount)
+        price=str(price),
+        amount=str(amount),
+        time_in_force="gtc"
     )
     return client.create_order(order)
 
