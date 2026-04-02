@@ -1,7 +1,7 @@
-name: Trading Bot
+name: Trading Bot V4
 
 permissions:
-  contents: write   # 🔥 INI FIX UTAMA
+  contents: write
 
 on:
   schedule:
@@ -13,24 +13,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout repo
       - uses: actions/checkout@v3
         with:
           persist-credentials: true
 
+      # Setup Python
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
+      # Install dependencies (UPGRADE DI SINI)
       - name: Install dependencies
-        run: pip install gate-api
+        run: pip install gate-api pandas numpy
 
+      # Run bot
       - name: Run bot
         env:
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
         run: python bot.py
 
+      # Save posisi (WAJIB untuk auto sell)
       - name: Save position
         run: |
           git config --global user.name "bot"
