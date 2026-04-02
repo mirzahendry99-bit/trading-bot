@@ -1,15 +1,13 @@
 import os
 import json
 import gate_api
-from gate_api.exceptions import ApiException
 
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
 
-# CONFIG
-ORDER_USDT = 10
-TAKE_PROFIT = 0.03     # 3%
-STOP_LOSS = 0.02       # 2%
+ORDER_PERCENT = 0.7   # Pakai 70% saldo
+TAKE_PROFIT = 0.03
+STOP_LOSS = 0.02
 MIN_VOLUME = 300000
 
 POSITION_FILE = "position.json"
@@ -21,6 +19,13 @@ def setup_client():
         secret=SECRET_KEY
     )
     return gate_api.SpotApi(gate_api.ApiClient(config))
+
+def get_balance(client):
+    accounts = client.list_spot_accounts()
+    for acc in accounts:
+        if acc.currency == "USDT":
+            return float(acc.available)
+    return 0
 
 def save_position(data):
     with open(POSITION_FILE, "w") as f:
@@ -36,21 +41,29 @@ def clear_position():
     if os.path.exists(POSITION_FILE):
         os.remove(POSITION_FILE)
 
+def is_valid_pair(pair):
+    bad = ["3S", "3L", "5S", "5L"]
+    return not any(x in pair for x in bad)
+
 def get_candidate(client):
     tickers = client.list_tickers()
-    
+
     for t in tickers:
         try:
-            if not t.currency_pair.endswith("_USDT"):
+            pair = t.currency_pair
+
+            if not pair.endswith("_USDT"):
+                continue
+
+            if not is_valid_pair(pair):
                 continue
 
             volume = float(t.quote_volume or 0)
             change = float(t.change_percentage or 0)
             price = float(t.last or 0)
 
-            # FILTER BARU (lebih realistis)
-            if volume > MIN_VOLUME and -3 < change < 3:
-                return t.currency_pair, price
+            if volume > MIN_VOLUME and -2 < change < 4:
+                return pair, price
 
         except:
             continue
@@ -59,7 +72,7 @@ def get_candidate(client):
 
 def place_market_buy(client, pair, usdt):
     price = float(client.list_tickers(currency_pair=pair)[0].last)
-    amount = round(usdt / price, 6)
+    amount = round((usdt * 0.97) / price, 6)
 
     order = gate_api.Order(
         currency_pair=pair,
@@ -80,12 +93,19 @@ def place_market_sell(client, pair, amount):
 
 def run_bot():
     client = setup_client()
-    print("=== BOT V2 STARTED ===")
+    print("=== FINAL BOT STARTED ===")
+
+    balance = get_balance(client)
+    print(f"Saldo USDT: {balance}")
+
+    if balance < 5:
+        print("Saldo terlalu kecil, skip")
+        return
 
     position = load_position()
 
     # ======================
-    # CHECK EXISTING POSITION
+    # CHECK POSITION
     # ======================
     if position:
         pair = position["pair"]
@@ -102,32 +122,34 @@ def run_bot():
 
         if current_price >= tp:
             place_market_sell(client, pair, amount)
-            print("TAKE PROFIT HIT 🚀")
+            print("TAKE PROFIT 🚀")
             clear_position()
 
         elif current_price <= sl:
             place_market_sell(client, pair, amount)
-            print("STOP LOSS HIT ❌")
+            print("STOP LOSS ❌")
             clear_position()
 
         else:
-            print("No exit signal")
+            print("Hold posisi")
 
         return
 
     # ======================
-    # ENTRY LOGIC
+    # ENTRY
     # ======================
     pair, price = get_candidate(client)
 
     if not pair:
-        print("No trade opportunity")
+        print("No entry signal")
         return
 
-    print(f"Entry candidate: {pair} @ {price}")
+    usdt = balance * ORDER_PERCENT
+
+    print(f"Entry: {pair} @ {price} | Size: {usdt}")
 
     try:
-        order, buy_price, amount = place_market_buy(client, pair, ORDER_USDT)
+        order, buy_price, amount = place_market_buy(client, pair, usdt)
 
         save_position({
             "pair": pair,
@@ -137,7 +159,7 @@ def run_bot():
 
         print(f"BOUGHT {pair} @ {buy_price}")
 
-    except ApiException as e:
+    except Exception as e:
         print(f"Trade error: {e}")
 
 if __name__ == "__main__":
