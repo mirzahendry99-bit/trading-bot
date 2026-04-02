@@ -8,19 +8,35 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
 
+    steps:
+      # Checkout repo
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: true
+
+      # Setup Python
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
+      # Install dependencies
       - name: Install dependencies
         run: pip install gate-api
 
+      # Run bot
       - name: Run bot
         env:
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
         run: python bot.py
+
+      # Save posisi (biar bot punya memory)
+      - name: Save position
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@example.com"
+          git add position.json || true
+          git commit -m "update position" || true
+          git push
