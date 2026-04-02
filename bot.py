@@ -114,14 +114,17 @@ def find_best(client):
 
 # ✅ MARKET ORDER ONLY (NO BUG)
 def market_buy(client, pair, usdt):
-    price = float(client.list_tickers(currency_pair=pair)[0].last)
+    ticker = client.list_tickers(currency_pair=pair)[0]
+    price = float(ticker.last)
+
     amount = round((usdt * 0.97) / price, 6)
 
     order = gate_api.Order(
         currency_pair=pair,
         type="market",
         side="buy",
-        amount=str(amount)
+        amount=str(amount),
+        time_in_force=None   # 🔥 FIX KRUSIAL
     )
 
     return client.create_order(order), price, amount
@@ -131,7 +134,8 @@ def market_sell(client, pair, amount):
         currency_pair=pair,
         type="market",
         side="sell",
-        amount=str(amount)
+        amount=str(amount),
+        time_in_force=None   # 🔥 FIX KRUSIAL
     )
 
     return client.create_order(order)
