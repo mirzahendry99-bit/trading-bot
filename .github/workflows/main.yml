@@ -2,7 +2,7 @@ name: Trading Bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # tiap 10 menit
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:
