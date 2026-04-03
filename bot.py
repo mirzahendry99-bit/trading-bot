@@ -184,5 +184,3 @@ def run_bot():
 if __name__ == "__main__":
     run_bot()
 ```
-
-Tap icon copy di pojok kanan atas → paste ke GitHub → commit → jalankan! 🚀
