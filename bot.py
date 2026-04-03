@@ -135,9 +135,8 @@ def market_sell(client, pair, amount):
         type="market",
         side="sell",
         amount=str(amount),
-        time_in_force=None   # 🔥 FIX KRUSIAL
+        time_in_force="ioc"
     )
-
     return client.create_order(order)
 
 def run_bot():
