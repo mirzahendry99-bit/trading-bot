@@ -1,11 +1,11 @@
-name: Trading Bot V4
+name: Trading Bot V6
 
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,41 +13,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repo (FIXED)
       - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
-      # Setup Python
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      # Install dependencies
       - name: Install dependencies
-        run: pip install gate-api pandas numpy
+        run: pip install gate-api supabase pandas numpy
 
-      # DEBUG VERSION (WAJIB)
-      - name: Debug file
-        run: |
-          echo "=== FILE CONTENT CHECK ==="
-          head -20 bot.py
-
-      # Run bot
       - name: Run bot
         env:
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python bot.py
-
-      # Save position
-      - name: Save position
-        run: |
-          git config --global user.name "bot"
-          git config --global user.email "bot@example.com"
-          git pull origin main --rebase || true
-          git add position.json || true
-          git commit -m "update position" || true
-          git push || true
