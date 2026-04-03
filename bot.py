@@ -150,14 +150,25 @@ def market_buy(client, pair, usdt):
 
     result = client.create_order(order)
 
+    # ✅ FIX UTAMA DI SINI
     buy_price = float(result.avg_deal_price or result.price or 0)
-    amount = float(result.amount or result.filled_total or 0)
+
+    # 🔥 ambil amount dari field yang BENAR
+    amount = float(
+        getattr(result, "filled_amount", 0) or
+        getattr(result, "amount", 0) or
+        0
+    )
+
+    # fallback hitung manual kalau API ngaco
+    if amount == 0 and buy_price > 0:
+        amount = funds / buy_price
 
     if amount == 0:
-        raise Exception("Amount hasil 0 (API error)")
+        raise Exception("Amount tetap 0 (API failure)")
 
     return result, buy_price, amount
-
+    
 def market_sell(client, pair, amount):
     if amount <= 0:
         raise Exception("Amount invalid")
