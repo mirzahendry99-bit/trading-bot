@@ -145,29 +145,32 @@ def market_buy(client, pair, usdt):
         type="market",
         side="buy"
     )
-
     order.funds = str(funds)
 
     result = client.create_order(order)
 
-    # ✅ FIX UTAMA DI SINI
-    buy_price = float(result.avg_deal_price or result.price or 0)
+    # =========================
+    # 🔥 VALIDASI HARD (WAJIB)
+    # =========================
 
-    # 🔥 ambil amount dari field yang BENAR
-    amount = float(
+    # kalau API ga kasih deal sama sekali → gagal
+    if not result or not hasattr(result, "status"):
+        raise Exception("Order gagal total (no response)")
+
+    # ambil data penting
+    buy_price = float(result.avg_deal_price or 0)
+
+    filled = float(
         getattr(result, "filled_amount", 0) or
         getattr(result, "amount", 0) or
         0
     )
 
-    # fallback hitung manual kalau API ngaco
-    if amount == 0 and buy_price > 0:
-        amount = funds / buy_price
+    # ❗ VALIDASI UTAMA
+    if filled == 0 or buy_price == 0:
+        raise Exception(f"Order tidak ke-fill (pair kemungkinan illiquid)")
 
-    if amount == 0:
-        raise Exception("Amount tetap 0 (API failure)")
-
-    return result, buy_price, amount
+    return result, buy_price, filled
     
 def market_sell(client, pair, amount):
     if amount <= 0:
