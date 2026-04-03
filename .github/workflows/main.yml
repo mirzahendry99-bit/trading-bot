@@ -1,8 +1,8 @@
-name: Trading Bot V7
+name: Trading Bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # tiap 10 menit
+    - cron: "*/10 * * * *"   # tiap 10 menit
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repo
+      - name: Checkout
         uses: actions/checkout@v3
 
       - name: Setup Python
@@ -18,16 +18,14 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
           pip install gate-api pandas numpy supabase
 
-      - name: Run Bot
+      - name: Run bot
         env:
           GATE_API_KEY: ${{ secrets.GATE_API_KEY }}
           GATE_SECRET_KEY: ${{ secrets.GATE_SECRET_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          python bot.py
+        run: python bot.py
