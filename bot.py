@@ -239,10 +239,17 @@ def do_buy(client, pair, usdt_balance):
 
     # ✅ FIX: tunggu sebentar lalu ambil order detail via ID
     time.sleep(2)
-    order_detail = client.get_order(result.id, pair)
+    order_detail = client.get_order(str(result.id), pair) if result.id else result
 
-    buy_price = float(order_detail.avg_deal_price or 0)
-    filled    = float(order_detail.filled_amount or 0)
+    buy_price = float(
+    getattr(order_detail, "avg_deal_price", None) or
+    getattr(result, "avg_deal_price", None) or 0
+)
+filled = float(
+    getattr(order_detail, "filled_amount", None) or
+    getattr(result, "filled_amount", None) or
+    getattr(result, "amount", None) or 0
+)
 
     if buy_price <= 0 or filled <= 0:
         raise Exception(
