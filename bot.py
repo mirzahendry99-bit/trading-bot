@@ -158,7 +158,7 @@ def market_buy(client, pair, usdt):
         currency_pair=pair,
         type="market",
         side="buy",
-        amount="0.01",  # 🔥 FIX WAJIB
+        amount="0.01",   # ✅ jangan 0
         price="0",
         time_in_force="ioc"
     )
@@ -169,6 +169,10 @@ def market_buy(client, pair, usdt):
 
     buy_price = float(result.avg_deal_price or result.price or 0)
     amount = float(result.filled_total or result.amount or 0)
+
+    # 🔥 FIX UTAMA: STOP kalau amount gagal
+    if amount < 0.01:
+        raise Exception(f"Order gagal (amount terlalu kecil): {amount}")
 
     return result, buy_price, amount
 
