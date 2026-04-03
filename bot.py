@@ -1,6 +1,3 @@
-**bot.py:**
-
-```python
 import os
 import gate_api
 import pandas as pd
