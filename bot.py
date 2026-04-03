@@ -3,18 +3,22 @@ import json
 import gate_api
 import pandas as pd
 import numpy as np
+from supabase import create_client
 
-print("🚀 BOT V5 FINAL RUNNING")
+print("🚀 BOT V6 SUPABASE RUNNING")
 
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
 # CONFIG
 TAKE_PROFIT = 0.05
 STOP_LOSS = 0.025
 TRAILING_GAP = 0.02
 MIN_VOLUME = 700000
-POSITION_FILE = "position.json"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def setup_client():
     config = gate_api.Configuration(
@@ -31,17 +35,29 @@ def get_balance(client):
     return 0
 
 def save_position(data):
-    with open(POSITION_FILE, "w") as f:
-        json.dump(data, f)
+    supabase.table("positions").delete().neq("id", 0).execute()
+    supabase.table("positions").insert(data).execute()
 
 def load_position():
-    if not os.path.exists(POSITION_FILE):
-        return None
-    return json.load(open(POSITION_FILE))
+    res = supabase.table("positions").select("*").eq("status", "open").execute()
+    if res.data:
+        return res.data[0]
+    return None
 
 def clear_position():
-    if os.path.exists(POSITION_FILE):
-        os.remove(POSITION_FILE)
+    supabase.table("positions").update({"status": "closed"}).eq("status", "open").execute()
+
+def save_trade(pair, buy_price, sell_price, amount, result):
+    profit = (sell_price - buy_price) * amount
+    supabase.table("trade_history").insert({
+        "pair": pair,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "amount": amount,
+        "profit": profit,
+        "result": result
+    }).execute()
+    print(f"📝 Trade saved: {result} | Profit: ${profit:.4f}")
 
 def is_valid_pair(pair):
     return pair.endswith("_USDT") and not any(x in pair for x in ["3S","3L","5S","5L"])
@@ -66,7 +82,7 @@ def ema(data, period):
 def market_ok(client):
     btc = client.list_tickers(currency_pair="BTC_USDT")[0]
     change = float(btc.change_percentage or 0)
-    print(f"BTC change: {change}")
+    print(f"BTC change: {change}%")
     return change > -2
 
 def score_coin(client, pair):
@@ -76,11 +92,9 @@ def score_coin(client, pair):
         e20 = ema(closes, 20)
         e50 = ema(closes, 50)
         vol_spike = volumes[-1] > np.mean(volumes[-20:]) * 1.5
-
         ticker = client.list_tickers(currency_pair=pair)[0]
         volume = float(ticker.quote_volume or 0)
         change = float(ticker.change_percentage or 0)
-
         score = 0
         if r < 35: score += 2
         if e20 > e50: score += 2
@@ -88,31 +102,22 @@ def score_coin(client, pair):
         if vol_spike: score += 1
         if volume > MIN_VOLUME: score += 1
         if change > 6: score -= 2
-
         print(f"{pair} RSI:{r:.1f} Score:{score}")
         return score, float(ticker.last)
     except:
         return 0, None
 
 def find_best(client):
-    best_pair = None
-    best_score = 0
-    best_price = 0
-
+    best_pair, best_score, best_price = None, 0, 0
     for t in client.list_tickers():
         pair = t.currency_pair
         if not is_valid_pair(pair):
             continue
-
         score, price = score_coin(client, pair)
         if score > best_score:
-            best_pair = pair
-            best_score = score
-            best_price = price
-
+            best_pair, best_score, best_price = pair, score, price
     return best_pair, best_price, best_score
 
-# ✅ MARKET ORDER ONLY (NO BUG)
 def market_buy(client, pair, usdt):
     funds = round(usdt * 0.97, 2)
     order = gate_api.Order(
@@ -128,7 +133,7 @@ def market_buy(client, pair, usdt):
     buy_price = float(result.avg_deal_price or result.price or 0)
     amount = float(result.amount or result.left or 0)
     return result, buy_price, amount
-    
+
 def market_sell(client, pair, amount):
     order = gate_api.Order(
         currency_pair=pair,
@@ -141,15 +146,14 @@ def market_sell(client, pair, amount):
 
 def run_bot():
     client = setup_client()
-
-    print("=== ENGINE START ===")
+    print("=== BOT V6 ENGINE START ===")
 
     if not market_ok(client):
         print("❌ Market risk-off, skip")
         return
 
     balance = get_balance(client)
-    print(f"💰 Balance: {balance}")
+    print(f"💰 Balance: {balance} USDT")
 
     if balance < 5:
         print("❌ Balance too small")
@@ -157,7 +161,6 @@ def run_bot():
 
     position = load_position()
 
-    # ================= HOLD MODE =================
     if position:
         pair = position["pair"]
         buy_price = position["buy_price"]
@@ -171,29 +174,32 @@ def run_bot():
         sl = buy_price * (1 - STOP_LOSS)
         trailing = peak * (1 - TRAILING_GAP)
 
-        print(f"📊 HOLD {pair} | Price: {current_price}")
+        print(f"📊 HOLD {pair} | Buy: {buy_price} | Now: {current_price} | Peak: {peak}")
 
         if current_price >= tp:
-            market_sell(client, pair, amount)
-            print("🚀 TAKE PROFIT")
+            sell_result = market_sell(client, pair, amount)
+            sell_price = float(sell_result.avg_deal_price or current_price)
+            save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
             clear_position()
+            print(f"🚀 TAKE PROFIT! {pair} @ {sell_price}")
 
         elif current_price <= sl or current_price <= trailing:
-            market_sell(client, pair, amount)
-            print("❌ STOP LOSS")
+            sell_result = market_sell(client, pair, amount)
+            sell_price = float(sell_result.avg_deal_price or current_price)
+            save_trade(pair, buy_price, sell_price, amount, "STOP_LOSS")
             clear_position()
+            print(f"❌ STOP LOSS! {pair} @ {sell_price}")
 
         else:
-            position["peak_price"] = peak
-            save_position(position)
+            supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
+            print(f"⏳ Holding... target: {tp:.4f} | stop: {sl:.4f}")
 
         return
 
-    # ================= ENTRY MODE =================
     pair, price, score = find_best(client)
 
     if not pair or score < 4:
-        print("❌ No valid signal")
+        print("❌ No valid signal found")
         return
 
     usdt = balance * 0.7
@@ -201,16 +207,14 @@ def run_bot():
 
     try:
         order, buy_price, amount = market_buy(client, pair, usdt)
-
         save_position({
             "pair": pair,
             "buy_price": buy_price,
             "amount": amount,
-            "peak_price": buy_price
+            "peak_price": buy_price,
+            "status": "open"
         })
-
-        print(f"✅ BOUGHT {pair} @ {buy_price}")
-
+        print(f"✅ BOUGHT {pair} @ {buy_price} | Amount: {amount}")
     except Exception as e:
         print(f"❌ Trade error: {e}")
 
