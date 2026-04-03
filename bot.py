@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from supabase import create_client
 
-print("🚀 BOT V7 STABLE RUNNING")
+print("🚀 BOT V8 FINAL RUNNING")
 
 # ================= CONFIG =================
 API_KEY = os.environ.get('GATE_API_KEY')
@@ -96,13 +96,14 @@ def market_ok(client):
 def score_coin(client, pair):
     try:
         closes, volumes = get_candles(client, pair)
+
         r = rsi(closes)
         e20 = ema(closes, 20)
         e50 = ema(closes, 50)
 
         vol_spike = volumes[-1] > np.mean(volumes[-20:]) * 1.5
-        ticker = client.list_tickers(currency_pair=pair)[0]
 
+        ticker = client.list_tickers(currency_pair=pair)[0]
         volume = float(ticker.quote_volume or 0)
         change = float(ticker.change_percentage or 0)
         price = float(ticker.last or 0)
@@ -151,6 +152,7 @@ def market_buy(client, pair, usdt):
         currency_pair=pair,
         type="market",
         side="buy",
+        amount="0",  # 🔥 FIX UTAMA
         time_in_force="ioc"
     )
 
@@ -158,12 +160,15 @@ def market_buy(client, pair, usdt):
 
     result = client.create_order(order)
 
+    print("DEBUG ORDER:", result)
+
     buy_price = float(result.avg_deal_price or 0)
 
     if buy_price == 0:
         return result, 0, 0
 
-    amount = float(result.filled_total or 0) / buy_price
+    filled = float(result.filled_total or funds)
+    amount = filled / buy_price
 
     return result, buy_price, amount
 
