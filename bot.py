@@ -120,17 +120,12 @@ def market_buy(client, pair, usdt):
         currency_pair=pair,
         type="market",
         side="buy",
-        amount=None,
-        price=None,
-        time_in_force=None,
-        iceberg=None,
-        auto_borrow=None,
-        auto_repay=None,
-        stp_act=None,
-        text="bot",
+        amount="0",          # 🔥 WAJIB ADA (dummy)
+        price="0",
+        time_in_force="ioc"  # 🔥 ganti dari GTC ke IOC
     )
 
-    order.funds = str(funds)  # 🔥 INI KUNCINYA
+    order.funds = str(funds)
 
     return client.create_order(order)
     
