@@ -115,19 +115,19 @@ def find_best(client):
 # ✅ MARKET ORDER ONLY (NO BUG)
 def market_buy(client, pair, usdt):
     funds = round(usdt * 0.97, 2)
-
     order = gate_api.Order(
         currency_pair=pair,
         type="market",
         side="buy",
-        amount="0",          # 🔥 WAJIB ADA (dummy)
+        amount="0",
         price="0",
-        time_in_force="ioc"  # 🔥 ganti dari GTC ke IOC
+        time_in_force="ioc"
     )
-
     order.funds = str(funds)
-
-    return client.create_order(order)
+    result = client.create_order(order)
+    buy_price = float(result.avg_deal_price or result.price or 0)
+    amount = float(result.amount or result.left or 0)
+    return result, buy_price, amount
     
 def market_sell(client, pair, amount):
     order = gate_api.Order(
