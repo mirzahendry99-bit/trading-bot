@@ -133,15 +133,16 @@ def score_pair(client, pair):
         return 0, None
 
 def find_best(client):
-    best_pair, best_score, best_price = None, 0, 0
+    candidates = []
     for t in client.list_tickers():
         pair = t.currency_pair
         if not is_valid(pair):
             continue
         score, price = score_pair(client, pair)
-        if price and score > best_score:
-            best_pair, best_score, best_price = pair, score, price
-    return best_pair, best_price, best_score
+        if price and score >= 4:
+            candidates.append((score, price, pair))
+    candidates.sort(reverse=True)
+    return candidates
 
 def get_min_amount(client, pair):
     try:
@@ -271,30 +272,30 @@ def run():
             print(f"Holding | Peak: {peak:.6f}")
         return
 
-    pair, price, score = find_best(client)
+    candidates = find_best(client)
 
-    if not pair or score < 4:
-        print("No valid signal")
-        return
+if not candidates:
+    print("No valid signal")
+    return
 
+for score, price, pair in candidates:
     print(f"ENTRY {pair} | Score: {score} | Price: {price}")
-
     try:
         buy_price, amount = do_buy(client, pair, balance)
-
         if buy_price <= 0 or amount <= 0:
-            print(f"Order tidak valid | price={buy_price} amount={amount}")
-            return
-
+            print(f"Skip {pair} - order invalid")
+            continue
         save_position({
             "pair": pair, "buy_price": buy_price,
             "amount": amount, "peak_price": buy_price, "status": "open"
         })
-
         usdt_spent = round(amount * buy_price, 2)
         print(f"BOUGHT {pair} | Price: {buy_price} | Amount: {amount} | Spent: ${usdt_spent}")
-        tg(f"BUY\nPair: {pair}\nPrice: ${buy_price:.6f}\nAmount: {amount}\nModal: ~${usdt_spent} USDT\nScore: {score}")
-
+        tg(f"BUY\nPair: {pair}\nPrice: ${buy_price:.6f}\nAmount: {amount}\nScore: {score}")
+        break
+    except Exception as e:
+        print(f"Skip {pair} - {e}")
+        continue
     except Exception as e:
         print(f"Trade error: {e}")
         tg(f"TRADE ERROR\nPair: {pair}\n{e}")
