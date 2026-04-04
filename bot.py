@@ -236,10 +236,11 @@ def do_buy(client, pair, usdt_balance):
 
     # Buat order dengan amount (bukan funds)
     order = gate_api.Order(
-        currency_pair=pair,
-        type="market",
-        side="buy",
-        amount=str(amount)
+    currency_pair=pair,
+    type="market",
+    side="buy",
+    amount=str(amount),
+    time_in_force="ioc"
     )
 
     result = client.create_order(order)
@@ -285,10 +286,11 @@ def do_sell(client, pair, amount):
     amount    = round(amount, precision)
 
     order = gate_api.Order(
-        currency_pair=pair,
-        type="market",
-        side="sell",
-        amount=str(amount)
+    currency_pair=pair,
+    type="market",
+    side="sell",
+    amount=str(amount),
+    time_in_force="ioc"
     )
     result = client.create_order(order)
 
