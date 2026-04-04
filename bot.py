@@ -144,7 +144,7 @@ def get_pair_info(client, pair):
         pairs = client.list_currency_pairs()
         for p in pairs:
             if p.id == pair:
-                precision   = int(p.amount_precision or 4)
+                precision   = int(p.amount_precision or 2)
                 min_amount  = float(p.min_base_amount or 0)
                 min_quote   = float(p.min_quote_amount or 0)
                 return precision, min_amount, min_quote
@@ -224,7 +224,10 @@ def do_buy(client, pair, usdt_balance):
     precision, min_amount, min_quote = get_pair_info(client, pair)
 
     raw_amount = usdt_to_spend / price
-    amount     = round(raw_amount, precision)
+    amount = round(raw_amount, precision)
+# Pastikan tidak kurang dari minimum
+if min_amount > 0 and amount < min_amount:
+    amount = min_amount
 
     print(f"Buy {pair} | Price:{price} | USDT:{usdt_to_spend} | Amt:{amount} | MinAmt:{min_amount} | MinQuote:{min_quote}")
 
