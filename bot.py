@@ -21,13 +21,13 @@ STOP_LOSS      = 0.025
 TRAILING_GAP   = 0.02
 MIN_VOLUME     = 700000
 MIN_USDT_ORDER = 5
-BUY_RATIO      = 0.7
+BUY_RATIO      = 0.5
 
 BLACKLIST = [
     "3S","3L","5S","5L",
     "TUSD","USDC","BUSD","DAI","FDUSD","USD1",
     "USDP","USDD","USDJ","ZUSD","GUSD","CUSD","SUSD",
-    "STBL","FRAX","LUSD","USDN","ALUSD","BEAN"
+    "STBL","FRAX","LUSD","USDN","STABLE","BARD"
 ]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
