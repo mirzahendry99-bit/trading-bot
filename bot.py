@@ -111,6 +111,13 @@ def market_buy(client, pair, usdt):
     funds = round(usdt * 0.97, 2)
     if funds < 1:
         raise Exception("Dana terlalu kecil")
+    # Cek minimum order
+    min_amount_info = client.list_currency_pairs(currency_pair=pair)
+    if min_amount_info:
+        min_amount = float(min_amount_info[0].min_base_amount or 0)
+        price = float(client.list_tickers(currency_pair=pair)[0].last)
+        if min_amount > 0 and (funds / price) < min_amount:
+            raise Exception(f"Order terlalu kecil untuk {pair}")
     order = gate_api.Order(currency_pair=pair, type="market", side="buy", amount="0", price="0", time_in_force="ioc")
     order.funds = str(funds)
     result = client.create_order(order)
