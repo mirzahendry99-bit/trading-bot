@@ -29,6 +29,7 @@ BLACKLIST = [
     "USDP","USDD","USDJ","ZUSD","GUSD","CUSD","SUSD",
     "STBL","FRAX","LUSD","USDN","STABLE","BARD"
 ]
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -130,12 +131,26 @@ def is_valid(pair):
 
 
 def get_price(client, pair):
-    """Ambil harga terakhir dari ticker."""
     try:
         ticker = client.list_tickers(currency_pair=pair)[0]
         return float(ticker.last or 0)
     except Exception:
         return 0.0
+
+
+def get_pair_info(client, pair):
+    """Ambil precision dan minimum order dari Gate.io."""
+    try:
+        pairs = client.list_currency_pairs()
+        for p in pairs:
+            if p.id == pair:
+                precision   = int(p.amount_precision or 4)
+                min_amount  = float(p.min_base_amount or 0)
+                min_quote   = float(p.min_quote_amount or 0)
+                return precision, min_amount, min_quote
+    except Exception as e:
+        print(f"⚠️ get_pair_info error: {e}")
+    return 4, 0, 0
 
 
 def score_pair(client, pair):
@@ -164,12 +179,12 @@ def score_pair(client, pair):
         vol_spike = volumes[-1] > np.mean(volumes[-20:]) * 1.5
 
         score = 0
-        if rsi < 35:           score += 2
-        if ema20 > ema50:      score += 2
-        if change > 0:         score += 1
-        if vol_spike:          score += 1
+        if rsi < 35:             score += 2
+        if ema20 > ema50:        score += 2
+        if change > 0:           score += 1
+        if vol_spike:            score += 1
         if vol_24h > MIN_VOLUME: score += 1
-        if change > 6:         score -= 2
+        if change > 6:           score -= 2
 
         print(f"{pair} RSI:{rsi:.1f} Score:{score}")
         return score, price
@@ -196,55 +211,39 @@ def find_best(client):
     return best_pair, best_price, best_score
 
 
-def get_pair_precision(client, pair):
-    """
-    Ambil amount_precision dari currency_pairs API.
-    Return jumlah decimal places untuk amount.
-    """
-    try:
-        pairs = client.list_currency_pairs()
-        for p in pairs:
-            if p.id == pair:
-                # amount_precision = jumlah decimal
-                return int(p.amount_precision or 4)
-    except Exception:
-        pass
-    return 4
-
-
 def do_buy(client, pair, usdt_balance):
-    """
-    ✅ FIX FUNDAMENTAL:
-    Hitung amount dari harga terkini, bukan pakai funds.
-    Gate.io market buy dengan amount (bukan funds) lebih reliable.
-    """
-    usdt_to_spend = round(usdt_balance * BUY_RATIO * 0.97, 4)
+    usdt_to_spend = round(usdt_balance * BUY_RATIO * 0.95, 4)
 
     if usdt_to_spend < MIN_USDT_ORDER:
         raise Exception(f"Dana terlalu kecil: {usdt_to_spend} USDT")
 
-    # Ambil harga terkini
     price = get_price(client, pair)
     if price <= 0:
         raise Exception(f"Harga {pair} tidak valid: {price}")
 
-    # Hitung amount berdasarkan harga
-    precision = get_pair_precision(client, pair)
+    precision, min_amount, min_quote = get_pair_info(client, pair)
+
     raw_amount = usdt_to_spend / price
-    amount = round(raw_amount, precision)
+    amount     = round(raw_amount, precision)
+
+    print(f"Buy {pair} | Price:{price} | USDT:{usdt_to_spend} | Amt:{amount} | MinAmt:{min_amount} | MinQuote:{min_quote}")
+
+    # Validasi minimum order Gate.io
+    if min_amount > 0 and amount < min_amount:
+        raise Exception(f"Amount {amount} di bawah minimum pair {min_amount}")
+
+    if min_quote > 0 and usdt_to_spend < min_quote:
+        raise Exception(f"USDT {usdt_to_spend} di bawah minimum quote {min_quote}")
 
     if amount <= 0:
         raise Exception(f"Amount hasil kalkulasi invalid: {amount}")
 
-    print(f"Buy {pair} | Price:{price} | USDT:{usdt_to_spend} | Amt:{amount}")
-
-    # Buat order dengan amount (bukan funds)
     order = gate_api.Order(
-    currency_pair=pair,
-    type="market",
-    side="buy",
-    amount=str(amount),
-    time_in_force="ioc"
+        currency_pair=pair,
+        type="market",
+        side="buy",
+        amount=str(amount),
+        time_in_force="ioc"
     )
 
     result = client.create_order(order)
@@ -252,21 +251,24 @@ def do_buy(client, pair, usdt_balance):
     if result is None:
         raise Exception("Order return None")
 
-    # Tunggu order terproses
     time.sleep(3)
 
-    # Ambil harga beli aktual dari avg_deal_price
     buy_price = float(getattr(result, "avg_deal_price", None) or price)
-    filled    = float(getattr(result, "filled_amount", None) or
-                      getattr(result, "amount", None) or amount)
+    filled    = float(
+        getattr(result, "filled_amount", None) or
+        getattr(result, "amount", None) or
+        amount
+    )
 
-    # Kalau result kosong, coba get_order
     if buy_price <= 0 or filled <= 0:
         try:
             detail    = client.get_order(str(result.id), pair)
             buy_price = float(getattr(detail, "avg_deal_price", None) or price)
-            filled    = float(getattr(detail, "filled_amount", None) or
-                              getattr(detail, "amount", None) or amount)
+            filled    = float(
+                getattr(detail, "filled_amount", None) or
+                getattr(detail, "amount", None) or
+                amount
+            )
         except Exception as e:
             print(f"⚠️ get_order gagal: {e}")
             buy_price = price
@@ -286,15 +288,15 @@ def do_sell(client, pair, amount):
     if amount <= 0:
         raise Exception(f"Amount tidak valid: {amount}")
 
-    precision = get_pair_precision(client, pair)
-    amount    = round(amount, precision)
+    precision, _, _ = get_pair_info(client, pair)
+    amount          = round(amount, precision)
 
     order = gate_api.Order(
-    currency_pair=pair,
-    type="market",
-    side="sell",
-    amount=str(amount),
-    time_in_force="ioc"
+        currency_pair=pair,
+        type="market",
+        side="sell",
+        amount=str(amount),
+        time_in_force="ioc"
     )
     result = client.create_order(order)
 
@@ -440,4 +442,4 @@ def run():
 
 if __name__ == "__main__":
     run()
-    
+            
