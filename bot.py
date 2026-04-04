@@ -236,13 +236,36 @@ def run():
         print(f"HOLD {pair} | Now:{current_price:.6f} TP:{tp:.6f} SL:{sl:.6f}")
 
         if current_price >= tp:
-            sell_price = do_sell(client, pair, amount)
-            profit = round((sell_price - buy_price) * amount, 4)
-            save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
-            clear_position()
-            print(f"TAKE PROFIT | Profit: ${profit}")
-            tg(f"TAKE PROFIT\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nProfit: +${profit:.4f}")
+    # Cek chart sebelum jual
+    try:
+        closes, volumes = get_candles(client, pair)
+        rsi_now = calc_rsi(closes)
+        ema20_now = calc_ema(closes, 20)
+        ema50_now = calc_ema(closes, 50)
+        vol_avg = np.mean(volumes[-20:])
+        vol_now = volumes[-1]
 
+        still_bullish = (
+            rsi_now < 68 and
+            ema20_now > ema50_now and
+            vol_now >= vol_avg * 0.8
+        )
+
+        if still_bullish:
+            supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
+            print(f"Profit {round((current_price/buy_price-1)*100,1)}% tapi chart masih bullish, hold... RSI:{rsi_now:.1f}")
+            tg(f"Profit sudah {round((current_price/buy_price-1)*100,1)}% tapi RSI:{rsi_now:.1f} masih bullish, hold dulu")
+            return
+
+    except Exception as e:
+        print(f"Chart check error: {e}")
+
+    sell_price = do_sell(client, pair, amount)
+    profit = round((sell_price - buy_price) * amount, 4)
+    save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
+    clear_position()
+    print(f"TAKE PROFIT | Profit: ${profit}")
+    tg(f"TAKE PROFIT\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nProfit: +${profit:.4f}")
         elif current_price <= sl or current_price <= trailing:
             sell_price = do_sell(client, pair, amount)
             loss = round((sell_price - buy_price) * amount, 4)
