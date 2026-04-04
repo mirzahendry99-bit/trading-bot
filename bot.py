@@ -20,7 +20,7 @@ TAKE_PROFIT = 0.05
 STOP_LOSS = 0.025
 TRAILING_GAP = 0.02
 MIN_VOLUME = 700000
-BUY_RATIO = 0.7
+ORDER_USDT = 5
 
 BLACKLIST = [
     "3S","3L","5S","5L","TUSD","USDC","BUSD","DAI",
@@ -154,7 +154,7 @@ def get_min_amount(client, pair):
     return 0, 4
 
 def do_buy(client, pair, balance):
-    funds = round(balance * BUY_RATIO * 0.97, 2)
+    funds = ORDER_USDT
     if funds < 1:
         raise Exception(f"Dana terlalu kecil: {funds}")
 
