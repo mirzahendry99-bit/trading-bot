@@ -9,19 +9,13 @@ from supabase import create_client
 
 print("🚀 BOT RUNNING")
 
-# =====================
-# ENV VARIABLES
-# =====================
-API_KEY        = os.environ.get("GATE_API_KEY")
-SECRET_KEY     = os.environ.get("GATE_SECRET_KEY")
-SUPABASE_URL   = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY   = os.environ.get("SUPABASE_KEY")
-TG_TOKEN       = os.environ.get("TELEGRAM_TOKEN")
-TG_CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID")
+API_KEY      = os.environ.get("GATE_API_KEY")
+SECRET_KEY   = os.environ.get("GATE_SECRET_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TG_TOKEN     = os.environ.get("TELEGRAM_TOKEN")
+TG_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# =====================
-# CONFIG
-# =====================
 TAKE_PROFIT    = 0.05
 STOP_LOSS      = 0.025
 TRAILING_GAP   = 0.02
@@ -34,9 +28,6 @@ BLACKLIST = ["3S","3L","5S","5L","TUSD","USDC","BUSD","DAI","FDUSD","USD1"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# =====================
-# TELEGRAM
-# =====================
 def tg(msg):
     try:
         if not TG_TOKEN or not TG_CHAT_ID:
@@ -56,9 +47,6 @@ def tg(msg):
         print(f"⚠️ Telegram error: {e}")
 
 
-# =====================
-# GATE CLIENT
-# =====================
 def get_client():
     cfg = gate_api.Configuration(
         host="https://api.gateio.ws/api/v4",
@@ -68,9 +56,6 @@ def get_client():
     return gate_api.SpotApi(gate_api.ApiClient(cfg))
 
 
-# =====================
-# BALANCE
-# =====================
 def get_balance(client):
     try:
         for acc in client.list_spot_accounts():
@@ -81,9 +66,6 @@ def get_balance(client):
     return 0.0
 
 
-# =====================
-# SUPABASE HELPERS
-# =====================
 def save_position(data):
     amt = data.get("amount")
     if not amt or float(amt) <= 0:
@@ -111,9 +93,6 @@ def save_trade(pair, buy_price, sell_price, amount, result):
     print(f"📝 {result} | Profit: ${profit:.4f}")
 
 
-# =====================
-# INDICATORS
-# =====================
 def calc_rsi(closes, period=14):
     s     = pd.Series(closes)
     delta = s.diff()
@@ -126,9 +105,6 @@ def calc_ema(closes, period):
     return float(pd.Series(closes).ewm(span=period).mean().iloc[-1])
 
 
-# =====================
-# MARKET FILTER
-# =====================
 def market_ok(client):
     try:
         btc    = client.list_tickers(currency_pair="BTC_USDT")[0]
@@ -140,9 +116,6 @@ def market_ok(client):
         return False
 
 
-# =====================
-# PAIR FILTER
-# =====================
 def is_valid(pair):
     if not pair.endswith("_USDT"):
         return False
@@ -152,9 +125,15 @@ def is_valid(pair):
     return True
 
 
-# =====================
-# SCORING
-# =====================
+def get_price(client, pair):
+    """Ambil harga terakhir dari ticker."""
+    try:
+        ticker = client.list_tickers(currency_pair=pair)[0]
+        return float(ticker.last or 0)
+    except Exception:
+        return 0.0
+
+
 def score_pair(client, pair):
     try:
         candles = client.list_candlesticks(
@@ -181,12 +160,12 @@ def score_pair(client, pair):
         vol_spike = volumes[-1] > np.mean(volumes[-20:]) * 1.5
 
         score = 0
-        if rsi < 35:       score += 2
-        if ema20 > ema50:  score += 2
-        if change > 0:     score += 1
-        if vol_spike:      score += 1
+        if rsi < 35:           score += 2
+        if ema20 > ema50:      score += 2
+        if change > 0:         score += 1
+        if vol_spike:          score += 1
         if vol_24h > MIN_VOLUME: score += 1
-        if change > 6:     score -= 2
+        if change > 6:         score -= 2
 
         print(f"{pair} RSI:{rsi:.1f} Score:{score}")
         return score, price
@@ -195,16 +174,12 @@ def score_pair(client, pair):
         return 0, None
 
 
-# =====================
-# FIND BEST PAIR
-# =====================
 def find_best(client):
     best_pair  = None
     best_score = 0
     best_price = 0
 
-    tickers = client.list_tickers()
-    for t in tickers:
+    for t in client.list_tickers():
         pair = t.currency_pair
         if not is_valid(pair):
             continue
@@ -217,52 +192,87 @@ def find_best(client):
     return best_pair, best_price, best_score
 
 
-# =====================
-# BUY — FIX PERMANEN
-# =====================
-def do_buy(client, pair, usdt_balance):
-    funds = round(usdt_balance * BUY_RATIO * 0.97, 2)
-    if funds < MIN_USDT_ORDER:
-        raise Exception(f"Dana terlalu kecil: {funds} USDT")
+def get_pair_precision(client, pair):
+    """
+    Ambil amount_precision dari currency_pairs API.
+    Return jumlah decimal places untuk amount.
+    """
+    try:
+        pairs = client.list_currency_pairs()
+        for p in pairs:
+            if p.id == pair:
+                # amount_precision = jumlah decimal
+                return int(p.amount_precision or 4)
+    except Exception:
+        pass
+    return 4
 
+
+def do_buy(client, pair, usdt_balance):
+    """
+    ✅ FIX FUNDAMENTAL:
+    Hitung amount dari harga terkini, bukan pakai funds.
+    Gate.io market buy dengan amount (bukan funds) lebih reliable.
+    """
+    usdt_to_spend = round(usdt_balance * BUY_RATIO * 0.97, 4)
+
+    if usdt_to_spend < MIN_USDT_ORDER:
+        raise Exception(f"Dana terlalu kecil: {usdt_to_spend} USDT")
+
+    # Ambil harga terkini
+    price = get_price(client, pair)
+    if price <= 0:
+        raise Exception(f"Harga {pair} tidak valid: {price}")
+
+    # Hitung amount berdasarkan harga
+    precision = get_pair_precision(client, pair)
+    raw_amount = usdt_to_spend / price
+    amount = round(raw_amount, precision)
+
+    if amount <= 0:
+        raise Exception(f"Amount hasil kalkulasi invalid: {amount}")
+
+    print(f"Buy {pair} | Price:{price} | USDT:{usdt_to_spend} | Amt:{amount}")
+
+    # Buat order dengan amount (bukan funds)
     order = gate_api.Order(
         currency_pair=pair,
         type="market",
-        side="buy"
+        side="buy",
+        amount=str(amount)
     )
-    order.funds = str(funds)
 
     result = client.create_order(order)
 
     if result is None:
         raise Exception("Order return None")
 
-    # ✅ FIX: tunggu sebentar lalu ambil order detail via ID
-    time.sleep(2)
-    order_detail = client.get_order(str(result.id), pair) if result.id else result
+    # Tunggu order terproses
+    time.sleep(3)
 
-    buy_price = float(
-    getattr(order_detail, "avg_deal_price", None) or
-    getattr(result, "avg_deal_price", None) or 0
-)
-filled = float(
-    getattr(order_detail, "filled_amount", None) or
-    getattr(result, "filled_amount", None) or
-    getattr(result, "amount", None) or 0
-)
+    # Ambil harga beli aktual dari avg_deal_price
+    buy_price = float(getattr(result, "avg_deal_price", None) or price)
+    filled    = float(getattr(result, "filled_amount", None) or
+                      getattr(result, "amount", None) or amount)
 
+    # Kalau result kosong, coba get_order
     if buy_price <= 0 or filled <= 0:
-        raise Exception(
-            f"Order tidak terisi (illiquid?) "
-            f"| avg_price={buy_price} filled={filled}"
-        )
+        try:
+            detail    = client.get_order(str(result.id), pair)
+            buy_price = float(getattr(detail, "avg_deal_price", None) or price)
+            filled    = float(getattr(detail, "filled_amount", None) or
+                              getattr(detail, "amount", None) or amount)
+        except Exception as e:
+            print(f"⚠️ get_order gagal: {e}")
+            buy_price = price
+            filled    = amount
+
+    if filled <= 0:
+        raise Exception(f"Order tidak terisi | filled={filled}")
 
     return buy_price, filled
 
 
-# =====================
-# SELL
-# =====================
 def do_sell(client, pair, amount):
     if amount is None:
         raise Exception("Amount None saat sell")
@@ -271,7 +281,8 @@ def do_sell(client, pair, amount):
     if amount <= 0:
         raise Exception(f"Amount tidak valid: {amount}")
 
-    amount = round(amount, 6)
+    precision = get_pair_precision(client, pair)
+    amount    = round(amount, precision)
 
     order = gate_api.Order(
         currency_pair=pair,
@@ -282,13 +293,19 @@ def do_sell(client, pair, amount):
     result = client.create_order(order)
 
     time.sleep(2)
-    detail = client.get_order(result.id, pair)
-    return float(detail.avg_deal_price or 0)
+
+    sell_price = float(getattr(result, "avg_deal_price", None) or 0)
+
+    if sell_price <= 0:
+        try:
+            detail     = client.get_order(str(result.id), pair)
+            sell_price = float(getattr(detail, "avg_deal_price", None) or 0)
+        except Exception:
+            pass
+
+    return sell_price
 
 
-# =====================
-# MAIN BOT
-# =====================
 def run():
     client = get_client()
     print("=== START ===")
@@ -306,16 +323,13 @@ def run():
 
     position = load_position()
 
-    # =========
     # HOLD MODE
-    # =========
     if position:
         pair      = position["pair"]
         buy_price = float(position.get("buy_price") or 0)
         amount    = position.get("amount")
         peak      = float(position.get("peak_price") or buy_price)
 
-        # Validasi amount dari DB
         if amount is None or float(amount) <= 0:
             print(f"❌ Amount invalid dari DB: {amount}")
             tg(f"⚠️ <b>POSISI RUSAK</b>\nPair: {pair}\nAmount: {amount}\nAuto clear.")
@@ -325,8 +339,7 @@ def run():
         amount = float(amount)
 
         try:
-            ticker        = client.list_tickers(currency_pair=pair)[0]
-            current_price = float(ticker.last or 0)
+            current_price = get_price(client, pair)
         except Exception as e:
             print(f"⚠️ Gagal ambil harga {pair}: {e}")
             return
@@ -340,10 +353,7 @@ def run():
         sl       = buy_price * (1 - STOP_LOSS)
         trailing = peak * (1 - TRAILING_GAP)
 
-        print(
-            f"HOLD {pair} | Now:{current_price:.6f} "
-            f"TP:{tp:.6f} SL:{sl:.6f} Trail:{trailing:.6f}"
-        )
+        print(f"HOLD {pair} | Now:{current_price:.6f} TP:{tp:.6f} SL:{sl:.6f} Trail:{trailing:.6f}")
 
         if current_price >= tp:
             sell_price = do_sell(client, pair, amount)
@@ -358,7 +368,6 @@ def run():
                 f"Pair: <b>{pair}</b>\n"
                 f"Buy:  ${buy_price:.6f}\n"
                 f"Sell: ${sell_price:.6f}\n"
-                f"Amt:  {amount}\n"
                 f"Profit: <b>+${profit:.4f}</b>"
             )
 
@@ -366,17 +375,16 @@ def run():
             sell_price = do_sell(client, pair, amount)
             if sell_price <= 0:
                 sell_price = current_price
-            loss = round((sell_price - buy_price) * amount, 4)
-            save_trade(pair, buy_price, sell_price, amount, "SL")
-            clear_position()
+            loss   = round((sell_price - buy_price) * amount, 4)
             reason = "SL" if current_price <= sl else "TRAILING"
+            save_trade(pair, buy_price, sell_price, amount, reason)
+            clear_position()
             print(f"❌ {reason}")
             tg(
                 f"❌ <b>{reason}</b>\n"
                 f"Pair: <b>{pair}</b>\n"
                 f"Buy:  ${buy_price:.6f}\n"
                 f"Sell: ${sell_price:.6f}\n"
-                f"Amt:  {amount}\n"
                 f"Loss: <b>${loss:.4f}</b>"
             )
 
@@ -384,13 +392,11 @@ def run():
             supabase.table("positions").update(
                 {"peak_price": peak}
             ).eq("status", "open").execute()
-            print(f"📊 Peak update: {peak:.6f}")
+            print(f"📊 Peak: {peak:.6f}")
 
         return
 
-    # ===========
     # ENTRY MODE
-    # ===========
     pair, price, score = find_best(client)
 
     if not pair or score < 4:
@@ -417,7 +423,7 @@ def run():
             f"Pair:  <b>{pair}</b>\n"
             f"Price: ${buy_price:.6f}\n"
             f"Amt:   {amount}\n"
-            f"Modal: ${usdt_spent} USDT\n"
+            f"Modal: ~${usdt_spent} USDT\n"
             f"Score: {score}"
         )
 
@@ -428,4 +434,4 @@ def run():
 
 if __name__ == "__main__":
     run()
-      
+    
