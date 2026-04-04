@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 import urllib.request
 import json
+from datetime import datetime
 from supabase import create_client
 
-print("BOT V9 RUNNING")
+print("BOT V10 RUNNING")
 
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
@@ -118,12 +119,10 @@ def score_pair(client, pair):
         price = float(ticker.last or 0)
         if price <= 0 or vol_24h < MIN_VOLUME:
             return 0, None
-
         vol_avg = np.mean(volumes[-20:])
         vol_now = volumes[-1]
         vol_spike_15 = vol_now > vol_avg * 1.5
         vol_spike_5 = vol_now > vol_avg * 5
-
         score = 0
         if rsi < 35: score += 2
         if ema20 > ema50: score += 2
@@ -132,7 +131,6 @@ def score_pair(client, pair):
         if vol_spike_5: score += 2
         if vol_24h > MIN_VOLUME: score += 1
         if change > 6: score -= 2
-
         print(f"{pair} RSI:{rsi:.1f} Score:{score} VolSpike:{round(vol_now/vol_avg,1)}x")
         return score, price
     except:
@@ -164,15 +162,11 @@ def do_buy(client, pair):
     price = float(client.list_tickers(currency_pair=pair)[0].last)
     if price <= 0:
         raise Exception(f"Harga {pair} tidak valid")
-
     min_amount, precision = get_min_amount(client, pair)
     amount = round(ORDER_USDT / price, precision)
-
     if min_amount > 0 and amount < min_amount:
         raise Exception(f"Amount {amount} < minimum {min_amount}")
-
     print(f"Buy {pair} | Amount: {amount} @ {price}")
-
     order = gate_api.Order(
         currency_pair=pair,
         type="market",
@@ -219,6 +213,10 @@ def check_still_bullish(client, pair):
     except:
         return False, 0
 
+def should_send_hourly_update():
+    now = datetime.utcnow()
+    return now.minute < 32
+
 def run():
     client = setup_client()
     print("=== START ===")
@@ -256,7 +254,7 @@ def run():
         tp = buy_price * (1 + TAKE_PROFIT)
         sl = buy_price * (1 - STOP_LOSS)
         trailing = peak * (1 - TRAILING_GAP)
-        profit_pct = round((current_price / buy_price - 1) * 100, 1)
+        profit_pct = round((current_price / buy_price - 1) * 100, 2)
 
         print(f"HOLD {pair} | Now:{current_price:.6f} TP:{tp:.6f} SL:{sl:.6f} PnL:{profit_pct}%")
 
@@ -265,28 +263,59 @@ def run():
             if still_bullish:
                 supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
                 print(f"Profit {profit_pct}% tapi masih bullish RSI:{rsi_now:.1f}, hold...")
-                tg(f"Profit {profit_pct}% — RSI:{rsi_now:.1f} masih bullish, hold kejar lebih tinggi!")
-                return
+                tg(
+                    f"Profit {profit_pct}% — masih bullish!\n"
+                    f"Pair: {pair}\n"
+                    f"RSI: {rsi_now:.1f} (belum overbought)\n"
+                    f"Hold kejar lebih tinggi..."
+                )
             else:
                 sell_price = do_sell(client, pair, amount)
                 profit = round((sell_price - buy_price) * amount, 4)
                 save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
                 clear_position()
                 print(f"TAKE PROFIT | Profit: ${profit}")
-                tg(f"TAKE PROFIT\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nProfit: +${profit:.4f}")
+                tg(
+                    f"TAKE PROFIT\n"
+                    f"Pair: {pair}\n"
+                    f"Buy: ${buy_price:.6f}\n"
+                    f"Sell: ${sell_price:.6f}\n"
+                    f"Profit: +${profit:.4f} (+{profit_pct}%)"
+                )
 
         elif current_price <= sl or current_price <= trailing:
             sell_price = do_sell(client, pair, amount)
             loss = round((sell_price - buy_price) * amount, 4)
-            reason = "STOP_LOSS" if current_price <= sl else "TRAILING"
+            loss_pct = round((sell_price / buy_price - 1) * 100, 2)
+            reason = "STOP LOSS" if current_price <= sl else "TRAILING STOP"
             save_trade(pair, buy_price, sell_price, amount, reason)
             clear_position()
             print(f"{reason} | Loss: ${loss}")
-            tg(f"{reason}\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nLoss: ${loss:.4f}")
+            tg(
+                f"{reason}\n"
+                f"Pair: {pair}\n"
+                f"Buy: ${buy_price:.6f}\n"
+                f"Sell: ${sell_price:.6f}\n"
+                f"Loss: ${loss:.4f} ({loss_pct}%)"
+            )
 
         else:
             supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
             print(f"Holding | Peak: {peak:.6f} | PnL: {profit_pct}%")
+            if should_send_hourly_update():
+                emoji = "📈" if profit_pct >= 0 else "📉"
+                tg(
+                    f"{emoji} Update Posisi\n"
+                    f"Pair: {pair}\n"
+                    f"Buy: ${buy_price:.6f}\n"
+                    f"Now: ${current_price:.6f}\n"
+                    f"PnL: {profit_pct}%\n"
+                    f"Peak: ${peak:.6f}\n"
+                    f"TP1: ${round(buy_price*1.05,6)} (+5%)\n"
+                    f"TP2: ${round(buy_price*1.10,6)} (+10%)\n"
+                    f"TP3: ${round(buy_price*1.20,6)} (+20%)\n"
+                    f"SL: ${round(buy_price*(1-STOP_LOSS),6)} (-{int(STOP_LOSS*100)}%)"
+                )
         return
 
     candidates = find_best(client)
@@ -306,9 +335,24 @@ def run():
                 "pair": pair, "buy_price": buy_price,
                 "amount": amount, "peak_price": buy_price, "status": "open"
             })
+            tp1 = round(buy_price * 1.05, 6)
+            tp2 = round(buy_price * 1.10, 6)
+            tp3 = round(buy_price * 1.20, 6)
+            sl_price = round(buy_price * (1 - STOP_LOSS), 6)
             usdt_spent = round(amount * buy_price, 2)
             print(f"BOUGHT {pair} | Price: {buy_price} | Amount: {amount} | Spent: ${usdt_spent}")
-            tg(f"BUY\nPair: {pair}\nPrice: ${buy_price:.6f}\nAmount: {amount}\nScore: {score}")
+            tg(
+                f"BUY\n"
+                f"Pair: {pair}\n"
+                f"Price: ${buy_price:.6f}\n"
+                f"Amount: {amount}\n"
+                f"Modal: ~${usdt_spent} USDT\n"
+                f"TP1: ${tp1} (+5%)\n"
+                f"TP2: ${tp2} (+10%)\n"
+                f"TP3: ${tp3} (+20%)\n"
+                f"SL: ${sl_price} (-{int(STOP_LOSS*100)}%)\n"
+                f"Score: {score}"
+            )
             break
         except Exception as e:
             print(f"Skip {pair} - {e}")
