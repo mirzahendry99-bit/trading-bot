@@ -155,39 +155,29 @@ def get_min_amount(client, pair):
     return 0, 4
 
 def do_buy(client, pair, balance):
-    funds = ORDER_USDT
-    if funds < 1:
-        raise Exception(f"Dana terlalu kecil: {funds}")
-
     price = float(client.list_tickers(currency_pair=pair)[0].last)
+    if price <= 0:
+        raise Exception(f"Harga {pair} tidak valid")
+    
     min_amount, precision = get_min_amount(client, pair)
-    estimated_amount = round(funds / price, precision)
-
-    if min_amount > 0 and estimated_amount < min_amount:
-        raise Exception(f"Order terlalu kecil: {estimated_amount} < min {min_amount}")
-
-    print(f"Buy {pair} | Funds: {funds} USDT | Est. amount: {estimated_amount}")
-
+    amount = round(ORDER_USDT / price, precision)
+    
+    if min_amount > 0 and amount < min_amount:
+        raise Exception(f"Amount {amount} < minimum {min_amount}")
+    
+    print(f"Buy {pair} | Amount: {amount} @ {price}")
+    
     order = gate_api.Order(
         currency_pair=pair,
         type="market",
         side="buy",
-        amount="0",
-        price="0",
+        amount=str(amount),
         time_in_force="ioc"
     )
-    order.funds = str(funds)
     result = client.create_order(order)
-
-    buy_price = float(result.avg_deal_price or 0)
-    filled = float(result.fill_price or 0)
-
-    time.sleep(2)
-
-    if buy_price <= 0:
-        buy_price = price
-    if filled <= 0:
-        filled = round(funds / buy_price, precision)
+    buy_price = float(result.avg_deal_price or price)
+    filled = float(result.amount or amount)
+    return buy_price, filled
 
     print(f"Filled: {filled} @ {buy_price}")
     return buy_price, filled
