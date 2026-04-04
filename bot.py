@@ -23,8 +23,12 @@ MIN_VOLUME     = 700000
 MIN_USDT_ORDER = 5
 BUY_RATIO      = 0.7
 
-BLACKLIST = ["3S","3L","5S","5L","TUSD","USDC","BUSD","DAI","FDUSD","USD1","USDP","USDD","USDJ","ZUSD","GUSD","CUSD","SUSD"]
-
+BLACKLIST = [
+    "3S","3L","5S","5L",
+    "TUSD","USDC","BUSD","DAI","FDUSD","USD1",
+    "USDP","USDD","USDJ","ZUSD","GUSD","CUSD","SUSD",
+    "STBL","FRAX","LUSD","USDN","ALUSD","BEAN"
+]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
