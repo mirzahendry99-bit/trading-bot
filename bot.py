@@ -6,7 +6,7 @@ import urllib.request
 import json
 from supabase import create_client
 
-print("BOT V8 RUNNING")
+print("BOT V9 RUNNING")
 
 API_KEY = os.environ.get('GATE_API_KEY')
 SECRET_KEY = os.environ.get('GATE_SECRET_KEY')
@@ -19,7 +19,7 @@ TAKE_PROFIT = 0.05
 STOP_LOSS = 0.025
 TRAILING_GAP = 0.02
 MIN_VOLUME = 700000
-ORDER_USDT = 5
+ORDER_USDT = 10
 
 BLACKLIST = [
     "3S","3L","5S","5L","TUSD","USDC","BUSD","DAI",
@@ -118,15 +118,22 @@ def score_pair(client, pair):
         price = float(ticker.last or 0)
         if price <= 0 or vol_24h < MIN_VOLUME:
             return 0, None
-        vol_spike = volumes[-1] > np.mean(volumes[-20:]) * 1.5
+
+        vol_avg = np.mean(volumes[-20:])
+        vol_now = volumes[-1]
+        vol_spike_15 = vol_now > vol_avg * 1.5
+        vol_spike_5 = vol_now > vol_avg * 5
+
         score = 0
         if rsi < 35: score += 2
         if ema20 > ema50: score += 2
         if change > 0: score += 1
-        if vol_spike: score += 1
+        if vol_spike_15: score += 1
+        if vol_spike_5: score += 2
         if vol_24h > MIN_VOLUME: score += 1
         if change > 6: score -= 2
-        print(f"{pair} RSI:{rsi:.1f} Score:{score}")
+
+        print(f"{pair} RSI:{rsi:.1f} Score:{score} VolSpike:{round(vol_now/vol_avg,1)}x")
         return score, price
     except:
         return 0, None
@@ -195,6 +202,23 @@ def do_sell(client, pair, amount):
     sell_price = float(result.avg_deal_price or price)
     return sell_price
 
+def check_still_bullish(client, pair):
+    try:
+        closes, volumes = get_candles(client, pair)
+        rsi_now = calc_rsi(closes)
+        ema20_now = calc_ema(closes, 20)
+        ema50_now = calc_ema(closes, 50)
+        vol_avg = np.mean(volumes[-20:])
+        vol_now = volumes[-1]
+        still_bullish = (
+            rsi_now < 68 and
+            ema20_now > ema50_now and
+            vol_now >= vol_avg * 0.8
+        )
+        return still_bullish, rsi_now
+    except:
+        return False, 0
+
 def run():
     client = setup_client()
     print("=== START ===")
@@ -232,40 +256,25 @@ def run():
         tp = buy_price * (1 + TAKE_PROFIT)
         sl = buy_price * (1 - STOP_LOSS)
         trailing = peak * (1 - TRAILING_GAP)
+        profit_pct = round((current_price / buy_price - 1) * 100, 1)
 
-        print(f"HOLD {pair} | Now:{current_price:.6f} TP:{tp:.6f} SL:{sl:.6f}")
+        print(f"HOLD {pair} | Now:{current_price:.6f} TP:{tp:.6f} SL:{sl:.6f} PnL:{profit_pct}%")
 
         if current_price >= tp:
-    # Cek chart sebelum jual
-    try:
-        closes, volumes = get_candles(client, pair)
-        rsi_now = calc_rsi(closes)
-        ema20_now = calc_ema(closes, 20)
-        ema50_now = calc_ema(closes, 50)
-        vol_avg = np.mean(volumes[-20:])
-        vol_now = volumes[-1]
+            still_bullish, rsi_now = check_still_bullish(client, pair)
+            if still_bullish:
+                supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
+                print(f"Profit {profit_pct}% tapi masih bullish RSI:{rsi_now:.1f}, hold...")
+                tg(f"Profit {profit_pct}% — RSI:{rsi_now:.1f} masih bullish, hold kejar lebih tinggi!")
+                return
+            else:
+                sell_price = do_sell(client, pair, amount)
+                profit = round((sell_price - buy_price) * amount, 4)
+                save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
+                clear_position()
+                print(f"TAKE PROFIT | Profit: ${profit}")
+                tg(f"TAKE PROFIT\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nProfit: +${profit:.4f}")
 
-        still_bullish = (
-            rsi_now < 68 and
-            ema20_now > ema50_now and
-            vol_now >= vol_avg * 0.8
-        )
-
-        if still_bullish:
-            supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
-            print(f"Profit {round((current_price/buy_price-1)*100,1)}% tapi chart masih bullish, hold... RSI:{rsi_now:.1f}")
-            tg(f"Profit sudah {round((current_price/buy_price-1)*100,1)}% tapi RSI:{rsi_now:.1f} masih bullish, hold dulu")
-            return
-
-    except Exception as e:
-        print(f"Chart check error: {e}")
-
-    sell_price = do_sell(client, pair, amount)
-    profit = round((sell_price - buy_price) * amount, 4)
-    save_trade(pair, buy_price, sell_price, amount, "TAKE_PROFIT")
-    clear_position()
-    print(f"TAKE PROFIT | Profit: ${profit}")
-    tg(f"TAKE PROFIT\nPair: {pair}\nBuy: ${buy_price:.6f}\nSell: ${sell_price:.6f}\nProfit: +${profit:.4f}")
         elif current_price <= sl or current_price <= trailing:
             sell_price = do_sell(client, pair, amount)
             loss = round((sell_price - buy_price) * amount, 4)
@@ -277,7 +286,7 @@ def run():
 
         else:
             supabase.table("positions").update({"peak_price": peak}).eq("status", "open").execute()
-            print(f"Holding | Peak: {peak:.6f}")
+            print(f"Holding | Peak: {peak:.6f} | PnL: {profit_pct}%")
         return
 
     candidates = find_best(client)
@@ -307,3 +316,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+    
