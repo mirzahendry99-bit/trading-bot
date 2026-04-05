@@ -276,11 +276,10 @@ def do_buy(client, pair, order_usdt):
         raise Exception(f"Amount {amount} < minimum {min_amount}")
     print(f"Buy {pair} | Amount: {amount} @ {price}")
     order = gate_api.Order(
-        currency_pair=pair,
-        type="market",
-        side="buy",
-        amount=str(amount),
-        time_in_force="ioc"
+    currency_pair=pair,
+    type="market",
+    side="buy",
+    amount=str(amount)
     )
     result = client.create_order(order)
     buy_price = float(result.avg_deal_price or price)
