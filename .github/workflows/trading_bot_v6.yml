@@ -2,7 +2,7 @@ name: Altcoin Trading Bot v6
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # setiap 30 menit — evaluasi posisi + cek sinyal baru
+    - cron: "*/10 * * * *"   # setiap 10 menit — evaluasi posisi + cek sinyal baru
   workflow_dispatch:
     inputs:
       reason:
