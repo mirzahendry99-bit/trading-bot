@@ -34,13 +34,15 @@ jobs:
 
       - name: Run bot
         env:
-          GATE_API_KEY:        ${{ secrets.GATE_API_KEY }}
-          GATE_SECRET_KEY:     ${{ secrets.GATE_SECRET_KEY }}
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
-          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID:             ${{ secrets.CHAT_ID }}
-          INITIAL_EQUITY_USDT: ${{ secrets.INITIAL_EQUITY_USDT }}
+          GATE_API_KEY:           ${{ secrets.GATE_API_KEY }}
+          GATE_SECRET_KEY:        ${{ secrets.GATE_SECRET_KEY }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:           ${{ secrets.SUPABASE_KEY }}
+          SIGNAL_SUPABASE_URL:    ${{ secrets.SIGNAL_SUPABASE_URL }}
+          SIGNAL_SUPABASE_KEY:    ${{ secrets.SIGNAL_SUPABASE_KEY }}
+          TELEGRAM_TOKEN:         ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID:                ${{ secrets.CHAT_ID }}
+          INITIAL_EQUITY_USDT:    ${{ secrets.INITIAL_EQUITY_USDT }}
         run: |
           for i in 1 2 3; do
             python bot_trading_v6.py && break
