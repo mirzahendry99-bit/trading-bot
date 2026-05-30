@@ -534,7 +534,7 @@ def get_pending_signals() -> list:
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(hours=SIGNAL_MAX_AGE_HOURS)).isoformat()
         res = supabase_signal.table("signals_v2") \
-            .select("id, pair, side, entry, sl, tp1, tp2, score, rr, tier, sent_at") \
+            .select("id, pair, side, entry, sl, tp1, tp2, score, tier, sent_at") \
             .is_("result", "null") \
             .eq("side", "BUY") \
             .gte("sent_at", cutoff) \
@@ -842,8 +842,7 @@ def execute_signal(client, sig: dict, equity: float,
     tp1_ref   = float(sig["tp1"] or 0)
     tp2_ref   = float(sig["tp2"] or 0)
     score     = float(sig.get("score") or 0)
-    rr        = float(sig.get("rr") or 0)
-    tier      = sig.get("tier", "B")
+    tier      = sig.get("tier") or "B"
     signal_id = str(sig["id"])
 
     # Skip jika pair sudah punya posisi open
@@ -876,6 +875,9 @@ def execute_signal(client, sig: dict, equity: float,
     sl_pct  = abs(entry_ref - sl_ref) / entry_ref
     tp1_pct = abs(tp1_ref - entry_ref) / entry_ref
     tp2_pct = abs(tp2_ref - entry_ref) / entry_ref
+
+    # Hitung RR dari data sinyal (tp2 vs sl)
+    rr = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 0.0
 
     sl_actual  = round(live_price * (1 - sl_pct), 8)
     tp1_actual = round(live_price * (1 + tp1_pct), 8)
@@ -1083,7 +1085,7 @@ def run():
             break
 
         log(f"\n   → Coba entry: {sig['pair']} | "
-            f"Score:{sig.get('score')} RR:{sig.get('rr')} Tier:{sig.get('tier')}")
+            f"Score:{sig.get('score')} Tier:{sig.get('tier')}")
 
         ok = execute_signal(client, sig, balance, open_pairs, idr_rate)
         if ok:
