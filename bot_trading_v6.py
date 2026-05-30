@@ -989,13 +989,30 @@ def run():
     log(f"💱 Kurs USD/IDR: Rp{idr_rate:,.0f}")
 
     balance = get_usdt_balance(client)
+    growth  = ((balance / INITIAL_EQUITY_USDT) - 1) * 100
     log(f"💰 Balance USDT: ${balance:.2f} | "
-        f"Growth: {((balance/INITIAL_EQUITY_USDT)-1)*100:+.1f}% dari modal awal ${INITIAL_EQUITY_USDT:.2f}")
+        f"Growth: {growth:+.1f}% dari modal awal ${INITIAL_EQUITY_USDT:.2f}")
 
-    # Daily report jam 08:00 WIB
     now_wib = datetime.now(WIB)
+
+    # ── Heartbeat — jam 08:00 WIB ─────────────────────
     if now_wib.hour == 8 and now_wib.minute < 30:
         send_daily_report(idr_rate)
+        daily_pnl_hb = get_daily_pnl()
+        open_pos_hb  = load_open_positions()
+        growth_icon  = "📈" if growth >= 0 else "📉"
+        tg(
+            f"💓 <b>Heartbeat — Altcoin Bot v{BOT_VERSION}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕗 {now_wib.strftime('%d %b %Y, %H:%M WIB')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Balance  : <b>${balance:.2f}</b> ({idr_fmt(balance, idr_rate)})\n"
+            f"{growth_icon} Growth    : <b>{growth:+.1f}%</b> dari modal ${INITIAL_EQUITY_USDT:.2f}\n"
+            f"📂 Posisi   : <b>{len(open_pos_hb)}/{MAX_OPEN_POSITIONS}</b> open\n"
+            f"📉 PnL hari ini: <b>${daily_pnl_hb:+.4f}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<i>✅ Bot aktif dan berjalan normal.</i>"
+        )
 
     # ── Step 1: Load open positions ───────────────────
     open_positions = load_open_positions()
@@ -1023,12 +1040,43 @@ def run():
     open_pairs     = {p["pair"] for p in open_positions}
     log(f"   Selesai: {closed_count} ditutup | {len(open_positions)} masih open")
 
+    # ── Run summary — setiap run ───────────────────────
+    daily_pnl   = get_daily_pnl()
+    pnl_emoji   = "✅" if daily_pnl >= 0 else "🔴"
+    bal_emoji   = "📈" if balance >= INITIAL_EQUITY_USDT else "📉"
+    pos_summary = ""
+    if open_positions:
+        lines = []
+        for p in open_positions:
+            try:
+                price   = get_ticker_price(client, p["pair"])
+                pnl_pct = (price / float(p["buy_price"]) - 1) * 100 if price > 0 else 0
+                lines.append(
+                    f"  • {p['pair']} | "
+                    f"Entry:${float(p['buy_price']):.4f} | "
+                    f"PnL:{pnl_pct:+.2f}%"
+                )
+            except Exception:
+                lines.append(f"  • {p['pair']}")
+        pos_summary = "\n" + "\n".join(lines)
+    tg(
+        f"📊 <b>Run Summary — Altcoin Bot</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {now_wib.strftime('%d %b %Y, %H:%M WIB')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{bal_emoji} Balance   : <b>${balance:.2f}</b> ({growth:+.1f}%)\n"
+        f"{pnl_emoji} PnL hari ini: <b>${daily_pnl:+.4f} USDT</b>\n"
+        f"📂 Posisi open: <b>{len(open_positions)}/{MAX_OPEN_POSITIONS}</b>"
+        f"{pos_summary}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 Ditutup run ini: {closed_count} | Direcovery: {recovered}"
+    )
+
     # ── Step 4: Safety checks sebelum entry ───────────
     if len(open_positions) >= MAX_OPEN_POSITIONS:
         log(f"⛔ Max posisi ({MAX_OPEN_POSITIONS}) tercapai — skip entry")
         return
 
-    daily_pnl = get_daily_pnl()
     log(f"📉 Daily PnL: ${daily_pnl:.4f}")
     if daily_pnl <= -MAX_DAILY_LOSS:
         log(f"⛔ Max daily loss ${daily_pnl:.2f} — stop hari ini")
@@ -1059,6 +1107,13 @@ def run():
 
     if not signals:
         log("📭 Tidak ada sinyal pending saat ini")
+        tg(
+            f"📭 <b>No Signal</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 {now_wib.strftime('%H:%M WIB')}\n"
+            f"Signal Bot belum mengirim sinyal baru.\n"
+            f"Balance siap: <b>${balance:.2f}</b> | Slot: <b>{MAX_OPEN_POSITIONS - len(open_positions)}</b>"
+        )
         return
 
     # Filter sinyal yang pairnya sudah open
@@ -1067,6 +1122,10 @@ def run():
 
     if not new_signals:
         log("📭 Semua sinyal pair sudah punya posisi open")
+        tg(
+            f"📭 <b>No New Signal</b>\n"
+            f"Semua sinyal pair sudah punya posisi open."
+        )
         return
 
     # ── Step 6: Eksekusi sinyal ───────────────────────
@@ -1082,6 +1141,11 @@ def run():
         balance = get_usdt_balance(client)
         if balance < MIN_ORDER_USDT:
             log(f"⚠️ Balance ${balance:.2f} tidak cukup — stop")
+            tg(
+                f"⚠️ <b>Balance Tidak Cukup</b>\n"
+                f"Balance: <b>${balance:.2f}</b> | Min order: <b>${MIN_ORDER_USDT:.2f}</b>\n"
+                f"Bot tidak bisa entry — top up diperlukan."
+            )
             break
 
         log(f"\n   → Coba entry: {sig['pair']} | "
