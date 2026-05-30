@@ -41,7 +41,15 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 TG_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 TG_CHAT_ID   = os.environ["CHAT_ID"]
 
+# ── Trading Bot Supabase (positions, trade_history, bot_state) ──
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ── Signal Bot Supabase (signals_v2) — instance terpisah ────────
+# Hanya digunakan untuk baca sinyal dan write-back hasil trade.
+# Set SIGNAL_SUPABASE_URL + SIGNAL_SUPABASE_KEY di GitHub Secrets.
+SIGNAL_SUPABASE_URL = os.environ["SIGNAL_SUPABASE_URL"]
+SIGNAL_SUPABASE_KEY = os.environ["SIGNAL_SUPABASE_KEY"]
+supabase_signal     = create_client(SIGNAL_SUPABASE_URL, SIGNAL_SUPABASE_KEY)
 
 BOT_VERSION = "6.0.0"
 WIB         = timezone(timedelta(hours=7))
@@ -360,11 +368,11 @@ def save_trade(pair: str, buy_price: float, sell_price: float,
 
 def update_signal_result(signal_id: str, result: str, pnl_usdt: float):
     """
-    Update result di signals_v2 setelah posisi close.
-    Ini yang membuat Signal Bot bisa tracking WR-nya sendiri.
+    Write-back hasil trade ke signals_v2 di Supabase Signal Bot.
+    Menggunakan supabase_signal agar Signal Bot bisa tracking WR-nya sendiri.
     """
     try:
-        supabase.table("signals_v2").update({
+        supabase_signal.table("signals_v2").update({
             "result":     result,
             "pnl_usdt":   round(pnl_usdt, 4),
             "closed_at":  datetime.now(timezone.utc).isoformat(),
@@ -514,7 +522,8 @@ def check_btc_crash(client) -> bool:
 
 def get_pending_signals() -> list:
     """
-    Ambil sinyal baru dari signals_v2 yang belum dieksekusi oleh trading bot.
+    Ambil sinyal baru dari signals_v2 di Supabase Signal Bot.
+    Menggunakan supabase_signal — client terpisah dari trading bot.
     Kriteria:
     - result IS NULL (belum ditutup)
     - side = 'BUY' (SELL disabled di Signal Bot)
@@ -524,7 +533,7 @@ def get_pending_signals() -> list:
     try:
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(hours=SIGNAL_MAX_AGE_HOURS)).isoformat()
-        res = supabase.table("signals_v2") \
+        res = supabase_signal.table("signals_v2") \
             .select("id, pair, side, entry, sl, tp1, tp2, score, rr, tier, sent_at") \
             .is_("result", "null") \
             .eq("side", "BUY") \
