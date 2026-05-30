@@ -74,6 +74,16 @@ COOLDOWN_SMART_CYCLES   = 2       # cooldown setelah smart exit
 BTC_CRASH_THRESHOLD     = -5.0    # % drop BTC 1h → blok entry
 SIGNAL_MAX_AGE_HOURS    = 2       # sinyal lebih dari 2 jam diabaikan
 
+# ── Recover filter ────────────────────────────────────────
+# Abaikan koin dengan nilai < $1 saat auto-recover (dust protection)
+MIN_POSITION_VALUE_USDT = 1.0
+
+# Blacklist token yang sudah delisted di Gate.io — skip tanpa API call
+# Update list ini jika ada token baru yang delisted
+DELISTED_TOKENS: set = {
+    "TEDDY", "FLOKICEO", "URO", "SHIBAI", "REKT", "MONG",
+}
+
 # ════════════════════════════════════════════════════════
 #  UTILITIES
 # ════════════════════════════════════════════════════════
@@ -452,9 +462,14 @@ def get_dynamic_risk_pct() -> float:
         risk = RISK_PCT_FLOOR
         log(f"⚠️ ECC: {losses_streak} loss streak → risk floor {risk*100:.1f}%")
     elif losses_streak == 2:
-        risk = 0.01
+        # FIX: Jangan turun ke 1% — di modal kecil itu di bawah MIN_ORDER_USDT
+        # Gunakan floor yang sama agar order size tetap valid
+        risk = RISK_PCT_FLOOR
+        log(f"⚠️ ECC: 2 loss streak → risk floor {risk*100:.1f}% (modal kecil guard)")
     elif losses_streak == 1:
-        risk = 0.015
+        # FIX: Sebelumnya 1.5% — masih terlalu kecil. Gunakan 50% dari default
+        risk = max(RISK_PCT_DEFAULT * 0.6, RISK_PCT_FLOOR)
+        log(f"⚠️ ECC: 1 loss streak → risk reduced {risk*100:.1f}%")
     elif wins_streak >= 3:
         boost = min(wins_streak - 2, 3) * 0.005
         risk  = min(RISK_PCT_DEFAULT + boost, RISK_PCT_CAP)
@@ -568,9 +583,15 @@ def auto_recover_orphan(client, open_positions: list):
         currency = acc.currency
         if currency == "USDT":
             continue
+
+        # FIX: Skip token yang sudah diketahui delisted — tanpa API call sama sekali
+        if currency in DELISTED_TOKENS:
+            log(f"  [RECOVER] {currency} ada di blacklist delisted — skip")
+            continue
+
         pair = f"{currency}_USDT"
         bal  = float(acc.available or 0)
-        if bal < 0.001:
+        if bal <= 0:
             continue
         if pair in open_pairs:
             continue
@@ -578,6 +599,7 @@ def auto_recover_orphan(client, open_positions: list):
         log(f"🔍 [RECOVER] {bal} {currency} ditemukan tanpa posisi — recover...")
         buy_price = 0.0
 
+        # FIX: Tangkap INVALID_CURRENCY lebih awal — log sekali, tambah ke blacklist runtime
         try:
             orders = gate_retry(
                 client.list_orders,
@@ -593,10 +615,23 @@ def auto_recover_orphan(client, open_positions: list):
                         buy_price = avg
                         break
         except Exception as e:
+            err_str = str(e)
+            if "INVALID_CURRENCY" in err_str or "delisted" in err_str.lower():
+                log(f"  [RECOVER] {currency} delisted di Gate.io — skip & tambah blacklist", "warn")
+                DELISTED_TOKENS.add(currency)
+                continue
             log(f"Order history {pair} error: {e}", "warn")
 
         if buy_price <= 0:
-            price = get_ticker_price(client, pair)
+            try:
+                price = get_ticker_price(client, pair)
+            except Exception as e:
+                err_str = str(e)
+                if "INVALID_CURRENCY" in err_str or "delisted" in err_str.lower():
+                    log(f"  [RECOVER] {currency} delisted di Gate.io — skip & tambah blacklist", "warn")
+                    DELISTED_TOKENS.add(currency)
+                    continue
+                price = 0.0
             if price > 0:
                 buy_price = price
                 log(f"  [RECOVER] Pakai harga live ${buy_price:.4f}")
@@ -605,7 +640,22 @@ def auto_recover_orphan(client, open_positions: list):
             log(f"  [RECOVER] Tidak bisa tentukan harga beli {pair} — skip", "warn")
             continue
 
-        sl_price  = round(buy_price * 0.975, 8)
+        # FIX: Filter dust — skip jika nilai posisi di bawah MIN_POSITION_VALUE_USDT
+        position_value = bal * buy_price
+        if position_value < MIN_POSITION_VALUE_USDT:
+            log(f"  [RECOVER] {currency} terlalu kecil (${position_value:.6f}) — skip dust")
+            continue
+
+        # FIX: SL dinamis berbasis volatilitas harga — koin sub-cent lebih lebar
+        # Harga > $1 → SL -3% | $0.01–$1 → SL -4% | < $0.01 → SL -5%
+        if buy_price >= 1.0:
+            sl_pct = 0.03
+        elif buy_price >= 0.01:
+            sl_pct = 0.04
+        else:
+            sl_pct = 0.05
+
+        sl_price  = round(buy_price * (1 - sl_pct), 8)
         tp1_price = round(buy_price * 1.05, 8)
         tp2_price = round(buy_price * 1.10, 8)
         order_val = round(bal * buy_price, 2)
@@ -626,12 +676,12 @@ def auto_recover_orphan(client, open_positions: list):
             f"🔄 <b>Auto-Recover Posisi</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Pair   : <b>{pair}</b>\n"
-            f"Amount : <b>{bal} {currency}</b>\n"
+            f"Amount : <b>{bal} {currency}</b> | Nilai: <b>${order_val:.2f}</b>\n"
             f"Buy    : <b>${buy_price:,.4f}</b>\n"
-            f"SL     : <b>${sl_price:,.4f}</b> (-2.5%)\n"
+            f"SL     : <b>${sl_price:,.4f}</b> (-{sl_pct*100:.0f}%)\n"
             f"<i>⚠️ Verifikasi harga beli di Gate.io history.</i>"
         )
-        log(f"✅ [RECOVER] {pair}: {bal} {currency} @ ${buy_price:.4f}")
+        log(f"✅ [RECOVER] {pair}: {bal} {currency} @ ${buy_price:.4f} (nilai: ${order_val:.2f})")
 
 
 # ════════════════════════════════════════════════════════
@@ -658,6 +708,15 @@ def evaluate_position(client, pos: dict, idr_rate: float) -> str:
     if price <= 0:
         log(f"  ⚠️ Ticker {pair} gagal — skip evaluasi", "warn")
         return "hold"
+
+    # FIX: Zombie position cleanup — tutup posisi jika nilai terlalu kecil untuk dijual
+    # Ini mencegah dust posisi memblokir slot open selamanya
+    position_value = amount * price
+    if position_value < MIN_POSITION_VALUE_USDT:
+        log(f"  🧹 {pair} zombie position (nilai: ${position_value:.6f}) — tutup tanpa sell")
+        close_position(pos_id)
+        log(f"  ✅ Zombie {pair} dibersihkan dari open positions")
+        return "sl"  # return 'sl' agar dihitung sebagai closed di caller
 
     peak = max(peak, price)
     update_position(pos_id, {"peak_price": peak})
@@ -932,8 +991,13 @@ def run():
     log(f"📂 Open positions: {len(open_positions)}/{MAX_OPEN_POSITIONS}")
 
     # ── Step 2: Auto-recover orphan positions ─────────
+    log(f"\n── Auto-recover orphan positions ──")
+    log(f"   Blacklist delisted: {len(DELISTED_TOKENS)} token ({', '.join(sorted(DELISTED_TOKENS))})")
+    pre_recover_count = len(open_positions)
     auto_recover_orphan(client, open_positions)
     open_positions = load_open_positions()  # reload setelah recover
+    recovered = len(open_positions) - pre_recover_count
+    log(f"   Recover selesai: +{recovered} posisi baru | Total: {len(open_positions)}")
 
     # ── Step 3: Evaluasi semua open positions ─────────
     log(f"\n── Evaluasi {len(open_positions)} posisi open ──")
