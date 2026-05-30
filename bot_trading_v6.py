@@ -51,20 +51,24 @@ WIB         = timezone(timedelta(hours=7))
 # ════════════════════════════════════════════════════════
 
 # ── Risk management ──────────────────────────────────────
-INITIAL_EQUITY_USDT     = float(os.environ.get("INITIAL_EQUITY_USDT", "350"))
-RISK_PCT_DEFAULT        = 0.01    # 1% equity per trade (default)
-RISK_PCT_FLOOR          = 0.005   # 0.5% saat drawdown parah
-RISK_PCT_CAP            = 0.03    # 3.0% saat win streak bagus
+# [EQUITY $17] Parameter disesuaikan untuk modal kecil.
+# Dengan $17, 1% risk = $0.17 → order size terlalu kecil dari MIN_ORDER $5.
+# Dinaikkan ke 5% agar order size $5-10 yang realistis.
+# MAX_ORDER_USDT dikap $10 = maks 58% equity — jangan lebih dari ini.
+INITIAL_EQUITY_USDT = float(os.environ.get("INITIAL_EQUITY_USDT") or "17")
+RISK_PCT_DEFAULT        = 0.05    # 5% equity per trade
+RISK_PCT_FLOOR          = 0.03    # 3% saat drawdown
+RISK_PCT_CAP            = 0.08    # 8% saat win streak bagus
 EQUITY_LOOKBACK         = 5       # evaluasi 5 trade terakhir
-MIN_ORDER_USDT          = 5.0
-MAX_ORDER_USDT          = 50.0
+MIN_ORDER_USDT          = 10.0    # minimum order Gate.io (actual minimum)
+MAX_ORDER_USDT          = 15.0    # cap $15 per trade — sisakan buffer dari $17
 
 # ── TP1 partial exit ─────────────────────────────────────
 TP1_SELL_RATIO          = 0.50    # jual 50% saat TP1 hit
 
 # ── Safety guards ─────────────────────────────────────────
-MAX_DAILY_LOSS          = 30.0    # stop trading jika loss > $30/hari
-MAX_OPEN_POSITIONS      = 3       # maksimal 3 posisi bersamaan
+MAX_DAILY_LOSS          = 5.0     # stop trading jika loss > $5/hari (30% dari $17)
+MAX_OPEN_POSITIONS      = 1       # [EQUITY $17] hanya 1 posisi aktif — tidak cukup untuk multi-posisi
 COOLDOWN_SL_CYCLES      = 3       # cooldown setelah SL
 COOLDOWN_SMART_CYCLES   = 2       # cooldown setelah smart exit
 BTC_CRASH_THRESHOLD     = -5.0    # % drop BTC 1h → blok entry
@@ -523,17 +527,23 @@ def get_pending_signals() -> list:
 def calc_order_size(equity: float, entry: float, sl: float,
                     risk_pct: float) -> float:
     """
-    Hitung order size dalam USDT berdasarkan equity, entry, SL, dan risk %.
-    Dibatasi antara MIN_ORDER_USDT dan MAX_ORDER_USDT.
+    Hitung order size dalam USDT berdasarkan equity AKTUAL saat ini.
+    Compounding: semakin besar equity, semakin besar order size otomatis.
+    Dibatasi MIN_ORDER_USDT dan MAX_ORDER_USDT.
+    Selalu sisakan buffer 20% dari equity untuk fee & slippage.
     """
     sl_pct = abs(entry - sl) / entry
     if sl_pct <= 0:
         return MIN_ORDER_USDT
-    risk_usdt  = equity * risk_pct
+
+    # Gunakan 80% equity sebagai modal aktif (20% buffer)
+    tradeable  = equity * 0.80
+    risk_usdt  = tradeable * risk_pct
     order_usdt = risk_usdt / sl_pct
+
     order_usdt = max(order_usdt, MIN_ORDER_USDT)
     order_usdt = min(order_usdt, MAX_ORDER_USDT)
-    order_usdt = min(order_usdt, equity * 0.15)  # max 15% equity per trade
+    order_usdt = min(order_usdt, tradeable)  # tidak boleh melebihi modal aktif
     return round(order_usdt, 2)
 
 
@@ -909,7 +919,8 @@ def run():
     log(f"💱 Kurs USD/IDR: Rp{idr_rate:,.0f}")
 
     balance = get_usdt_balance(client)
-    log(f"💰 Balance USDT: ${balance:.2f}")
+    log(f"💰 Balance USDT: ${balance:.2f} | "
+        f"Growth: {((balance/INITIAL_EQUITY_USDT)-1)*100:+.1f}% dari modal awal ${INITIAL_EQUITY_USDT:.2f}")
 
     # Daily report jam 08:00 WIB
     now_wib = datetime.now(WIB)
