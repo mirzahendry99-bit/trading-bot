@@ -1,8 +1,8 @@
-name: Altcoin Trading Bot v6
+name: Altcoin Trading Bot v6.1
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # setiap 10 menit — evaluasi posisi + cek sinyal baru
+    - cron: "*/10 * * * *"   # setiap 10 menit — evaluasi posisi + scan sinyal baru
   workflow_dispatch:
     inputs:
       reason:
@@ -12,13 +12,13 @@ on:
 
 concurrency:
   group: altcoin-trading-bot
-  cancel-in-progress: true   # hindari dua run bersamaan yang bisa double-entry
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     name: Run Altcoin Trading Bot
     runs-on: ubuntu-latest
-    timeout-minutes: 8       # bot seharusnya selesai < 5 menit
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -30,7 +30,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install gate-api supabase
+        run: pip install gate-api supabase numpy
 
       - name: Run bot
         env:
