@@ -1,23 +1,25 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║           ALTCOIN TRADING BOT v6.0 — Signal-Driven              ║
+║         ALTCOIN TRADING BOT v6.1 — Integrated Scanner           ║
 ║                                                                  ║
-║  Arsitektur v6:                                                  ║
-║  - Entry   : Driven by Signal Bot Lite (signals_v2 Supabase)    ║
-║              Bot ini tidak punya scoring engine sendiri.         ║
-║              Keputusan entry 100% dari signal bot.               ║
-║  - Pair    : Multi-pair altcoin (semua pair dari signals_v2)     ║
-║  - Order   : Market order IOC (BUY & SELL)                      ║
+║  Arsitektur v6.1 (Integrated):                                   ║
+║  - Scanner : Built-in scoring engine dari Signal Bot Lite v1.4.2 ║
+║              EMA, MACD, ADX, RSI, ATR, accumulation detection   ║
+║              Multi-timeframe (1h + 4h confirmation)              ║
+║  - Entry   : Langsung dari hasil scan — zero latency             ║
+║  - Pair    : Semua pair USDT di Gate.io (vol > 150K USDT/hari)  ║
+║  - Order   : Market order IOC (BUY)                             ║
 ║  - Exit    : TP1 (partial 50%) → TP2 (full) → SL               ║
 ║              SL geser ke breakeven setelah TP1 hit              ║
-║  - Risk    : Dynamic risk % dari equity curve (ECC dari v4)     ║
-║  - Safety  : Max daily loss, cooldown, crash guard (BTC)        ║
+║  - Risk    : Dynamic risk % dari equity curve (ECC)             ║
+║  - Safety  : Max daily loss, cooldown, BTC crash guard          ║
+║              BLOCK_HOURS 23:00-06:00 WIB (low WR hours)        ║
 ║  - Recover : Auto-recover orphan position per pair              ║
 ║                                                                  ║
-║  Flow per run (dipanggil GitHub Actions setiap 30 menit):       ║
-║  1. Cek semua open positions → evaluasi SL/TP                   ║
-║  2. Cek signal baru di signals_v2 → eksekusi entry              ║
-║  3. Update result di signals_v2 setelah close                   ║
+║  Flow per run (GitHub Actions setiap 10 menit):                 ║
+║  1. Evaluasi open positions → SL/TP                             ║
+║  2. Safety checks (BTC, daily loss, cooldown, block hours)      ║
+║  3. Scan semua pair → score → langsung eksekusi entry           ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -26,6 +28,8 @@ import json
 import time
 import math
 import urllib.request
+import urllib.parse
+import numpy as np
 import gate_api
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
@@ -44,14 +48,13 @@ TG_CHAT_ID   = os.environ["CHAT_ID"]
 # ── Trading Bot Supabase (positions, trade_history, bot_state) ──
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── Signal Bot Supabase (signals_v2) — instance terpisah ────────
-# Hanya digunakan untuk baca sinyal dan write-back hasil trade.
-# Set SIGNAL_SUPABASE_URL + SIGNAL_SUPABASE_KEY di GitHub Secrets.
-SIGNAL_SUPABASE_URL = os.environ["SIGNAL_SUPABASE_URL"]
-SIGNAL_SUPABASE_KEY = os.environ["SIGNAL_SUPABASE_KEY"]
-supabase_signal     = create_client(SIGNAL_SUPABASE_URL, SIGNAL_SUPABASE_KEY)
+# ── Signal Bot Supabase — opsional, hanya untuk winrate per pair ────────
+# Kalau tidak di-set, winrate lookup di-skip (tidak error).
+_sig_url = os.environ.get("SIGNAL_SUPABASE_URL", "")
+_sig_key = os.environ.get("SIGNAL_SUPABASE_KEY", "")
+supabase_signal = create_client(_sig_url, _sig_key) if (_sig_url and _sig_key) else None
 
-BOT_VERSION = "6.0.0"
+BOT_VERSION = "6.1.0"
 WIB         = timezone(timedelta(hours=7))
 
 # ════════════════════════════════════════════════════════
@@ -59,38 +62,63 @@ WIB         = timezone(timedelta(hours=7))
 # ════════════════════════════════════════════════════════
 
 # ── Risk management ──────────────────────────────────────
-# [EQUITY $17] Parameter disesuaikan untuk modal kecil.
-# Dengan $17, 1% risk = $0.17 → order size terlalu kecil dari MIN_ORDER $5.
-# Dinaikkan ke 5% agar order size $5-10 yang realistis.
-# MAX_ORDER_USDT dikap $10 = maks 58% equity — jangan lebih dari ini.
 INITIAL_EQUITY_USDT = float(os.environ.get("INITIAL_EQUITY_USDT") or "17")
-RISK_PCT_DEFAULT        = 0.05    # 5% equity per trade
-RISK_PCT_FLOOR          = 0.03    # 3% saat drawdown
-RISK_PCT_CAP            = 0.08    # 8% saat win streak bagus
-EQUITY_LOOKBACK         = 5       # evaluasi 5 trade terakhir
-MIN_ORDER_USDT          = 10.0    # minimum order Gate.io (actual minimum)
-MAX_ORDER_USDT          = 15.0    # cap $15 per trade — sisakan buffer dari $17
+RISK_PCT_DEFAULT        = 0.05
+RISK_PCT_FLOOR          = 0.03
+RISK_PCT_CAP            = 0.08
+EQUITY_LOOKBACK         = 5
+MIN_ORDER_USDT          = 10.0
+MAX_ORDER_USDT          = 15.0
 
 # ── TP1 partial exit ─────────────────────────────────────
-TP1_SELL_RATIO          = 0.50    # jual 50% saat TP1 hit
+TP1_SELL_RATIO          = 0.50
 
 # ── Safety guards ─────────────────────────────────────────
-MAX_DAILY_LOSS          = 5.0     # stop trading jika loss > $5/hari (30% dari $17)
-MAX_OPEN_POSITIONS      = 1       # [EQUITY $17] hanya 1 posisi aktif — tidak cukup untuk multi-posisi
-COOLDOWN_SL_CYCLES      = 3       # cooldown setelah SL
-COOLDOWN_SMART_CYCLES   = 2       # cooldown setelah smart exit
-BTC_CRASH_THRESHOLD     = -5.0    # % drop BTC 1h → blok entry
-SIGNAL_MAX_AGE_HOURS    = 2       # sinyal lebih dari 2 jam diabaikan
+MAX_DAILY_LOSS          = 5.0
+MAX_OPEN_POSITIONS      = 1
+COOLDOWN_SL_CYCLES      = 3
+COOLDOWN_SMART_CYCLES   = 2
+BTC_CRASH_THRESHOLD     = -5.0
 
 # ── Recover filter ────────────────────────────────────────
-# Abaikan koin dengan nilai < $1 saat auto-recover (dust protection)
 MIN_POSITION_VALUE_USDT = 1.0
-
-# Blacklist token yang sudah delisted di Gate.io — skip tanpa API call
-# Update list ini jika ada token baru yang delisted
 DELISTED_TOKENS: set = {
     "TEDDY", "FLOKICEO", "URO", "SHIBAI", "REKT", "MONG",
 }
+
+# ── Scanner config (dari Signal Bot Lite v1.4.2) ──────────
+MIN_VOLUME_USDT     = 150_000   # volume minimum pair per hari
+MIN_SCORE           = 3.0       # score minimum untuk entry
+MIN_RR              = 1.5       # risk/reward minimum
+MAX_ENTRY_DEV       = 0.02      # max deviasi harga dari entry signal (2%)
+MAX_SL_PCT          = 0.035     # max SL 3.5% dari entry
+MIN_SL_PCT          = 0.005     # min SL 0.5% dari entry
+TP1_R               = 1.5       # TP1 = SL dist × 1.5
+TP2_R               = 2.5       # TP2 = SL dist × 2.5
+SL_ATR_MULT         = 2.0       # SL = entry ± ATR × 2.0
+ATR_SL_BUFFER       = 0.5       # SL = swing ± ATR × 0.5
+ADX_TREND           = 25        # ADX ≥ 25 = trending
+ADX_CHOP            = 20        # ADX < 20 = choppy
+ADX_PERIOD          = 14
+BTC_DROP_BLOCK      = -3.0      # BTC drop > 3% → blok BUY
+BTC_CRASH_BLOCK     = -10.0     # BTC drop > 10% → halt semua
+BTC_VOLATILE_1H     = 1.5       # BTC 1h range > 1.5% = volatile
+BTC_RANGE_1H        = 2.5
+BTC_TREND_LOOKBACK  = 4
+BTC_TREND_MIN_BEARISH = 3
+
+# Block jam dengan WR rendah (23:00–06:00 WIB)
+_default_block = "23,0,1,2,3,4,5,6"
+BLOCK_HOURS_WIB = set(
+    int(h.strip())
+    for h in os.getenv("BLOCK_HOURS_WIB", _default_block).split(",")
+    if h.strip().isdigit()
+)
+
+# API health tracking
+_api_failures = 0
+API_FAILURE_THRESHOLD = 5
+_CANDLE_FORMAT_LOGGED = False
 
 # ════════════════════════════════════════════════════════
 #  UTILITIES
@@ -162,6 +190,528 @@ def idr_fmt(usdt: float, rate: float) -> str:
         return f"Rp{idr:,.0f}"
     return f"Rp{idr:.2f}"
 
+
+# ════════════════════════════════════════════════════════
+#  SCANNER — TECHNICAL INDICATORS
+#  Ported dari Signal Bot Lite v1.4.2
+# ════════════════════════════════════════════════════════
+
+def _track_api(success: bool) -> None:
+    global _api_failures
+    if success:
+        _api_failures = max(0, _api_failures - 1)
+    else:
+        _api_failures += 1
+
+def api_is_degraded() -> bool:
+    return _api_failures >= API_FAILURE_THRESHOLD
+
+def calc_ema(closes: list, period: int) -> float:
+    if len(closes) < period:
+        return closes[-1]
+    k = 2.0 / (period + 1)
+    ema = closes[0]
+    for p in closes[1:]:
+        ema = p * k + ema * (1.0 - k)
+    return ema
+
+def calc_rsi(closes: list, period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    deltas   = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains    = [d if d > 0 else 0.0 for d in deltas[-period:]]
+    losses   = [-d if d < 0 else 0.0 for d in deltas[-period:]]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    return round(100 - (100 / (1 + avg_gain / avg_loss)), 2)
+
+def calc_macd(closes: list):
+    if len(closes) < 34:
+        return 0.0, 0.0
+    k12 = 2.0 / 13
+    k26 = 2.0 / 27
+    k9  = 2.0 / 10
+    ema12 = closes[0]
+    ema26 = closes[0]
+    macd_series = []
+    for price in closes:
+        ema12 = price * k12 + ema12 * (1.0 - k12)
+        ema26 = price * k26 + ema26 * (1.0 - k26)
+        macd_series.append(ema12 - ema26)
+    signal = macd_series[0]
+    for v in macd_series[1:]:
+        signal = v * k9 + signal * (1.0 - k9)
+    return round(macd_series[-1], 8), round(signal, 8)
+
+def calc_atr(closes: list, highs: list, lows: list, period: int = 14) -> float:
+    if len(closes) < 2:
+        return highs[-1] - lows[-1]
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i]  - lows[i],
+            abs(highs[i]  - closes[i-1]),
+            abs(lows[i]   - closes[i-1])
+        )
+        trs.append(tr)
+    return sum(trs[-period:]) / min(period, len(trs))
+
+def calc_adx(closes: list, highs: list, lows: list, period: int = 14) -> float:
+    if len(closes) < period * 2:
+        return 20.0
+    plus_dm_list, minus_dm_list, tr_list = [], [], []
+    for i in range(1, len(closes)):
+        h_diff = highs[i]  - highs[i-1]
+        l_diff = lows[i-1] - lows[i]
+        plus_dm_list.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
+        minus_dm_list.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
+        tr_list.append(max(
+            highs[i] - lows[i],
+            abs(highs[i]  - closes[i-1]),
+            abs(lows[i]   - closes[i-1])
+        ))
+    def smooth(lst):
+        s = sum(lst[:period])
+        result = [s]
+        for v in lst[period:]:
+            s = s - s / period + v
+            result.append(s)
+        return result
+    sm_tr    = smooth(tr_list)
+    sm_plus  = smooth(plus_dm_list)
+    sm_minus = smooth(minus_dm_list)
+    dx_list  = []
+    for i in range(len(sm_tr)):
+        if sm_tr[i] == 0:
+            continue
+        pdi  = 100 * sm_plus[i]  / sm_tr[i]
+        mdi  = 100 * sm_minus[i] / sm_tr[i]
+        dsum = pdi + mdi
+        dx_list.append(100 * abs(pdi - mdi) / dsum if dsum > 0 else 0)
+    if not dx_list:
+        return 20.0
+    return sum(dx_list[-period:]) / min(period, len(dx_list))
+
+def detect_regime(closes: list, highs: list, lows: list) -> dict:
+    adx = calc_adx(closes, highs, lows)
+    if adx >= ADX_TREND:
+        regime = "TRENDING"
+    elif adx >= ADX_CHOP:
+        regime = "RANGING"
+    else:
+        regime = "CHOPPY"
+    return {"regime": regime, "adx": round(adx, 1)}
+
+def detect_structure(closes: list, highs: list, lows: list, lookback: int = 60) -> dict:
+    c = closes[-lookback:]
+    h = highs[-lookback:]
+    l = lows[-lookback:]
+    n = len(c)
+    last_sh, last_sl = None, None
+    for i in range(n-2, 1, -1):
+        if h[i] > h[i-1] and h[i] > h[i+1] and last_sh is None:
+            last_sh = h[i]
+        if l[i] < l[i-1] and l[i] < l[i+1] and last_sl is None:
+            last_sl = l[i]
+        if last_sh and last_sl:
+            break
+    return {
+        "valid":   last_sh is not None and last_sl is not None,
+        "last_sh": last_sh,
+        "last_sl": last_sl,
+    }
+
+def detect_accumulation(closes: list, highs: list, lows: list,
+                         volumes: list, lookback: int = 15) -> dict:
+    if len(closes) < lookback + 5:
+        return {"accumulating": False, "obv_slope": 0.0, "cmf": 0.0}
+    c = closes[-lookback:]
+    h = highs[-lookback:]
+    l = lows[-lookback:]
+    v = volumes[-lookback:]
+    avg_price   = sum(c) / len(c)
+    price_range = (max(h) - min(l)) / avg_price if avg_price > 0 else 1.0
+    obv = [0.0]
+    for i in range(1, len(c)):
+        if c[i] > c[i-1]:   obv.append(obv[-1] + v[i])
+        elif c[i] < c[i-1]: obv.append(obv[-1] - v[i])
+        else:                obv.append(obv[-1])
+    obv_early = sum(obv[:5]) / 5
+    obv_late  = sum(obv[-5:]) / 5
+    obv_slope = (obv_late - obv_early) / (abs(obv_early) + 1)
+    mf_vol = total_vol = 0.0
+    for i in range(-14, 0):
+        hi, lo, cl, vl = h[i], l[i], c[i], v[i]
+        hl_range = hi - lo
+        mf_mult  = ((cl - lo) - (hi - cl)) / hl_range if hl_range > 0 else 0.0
+        mf_vol    += mf_mult * vl
+        total_vol += vl
+    cmf = mf_vol / total_vol if total_vol > 0 else 0.0
+    accumulating = price_range < 0.08 and obv_slope > 0.05 and cmf > 0.0
+    return {
+        "accumulating": accumulating,
+        "obv_slope":    round(obv_slope, 3),
+        "cmf":          round(cmf, 3),
+    }
+
+def is_organic_move(closes: list, volumes: list, lookback: int = 10) -> dict:
+    if len(closes) < lookback + 2 or len(volumes) < lookback + 2:
+        return {"organic": True, "reason": "data kurang"}
+    c = closes[-(lookback+2):]
+    v = volumes[-(lookback+2):]
+    avg_vol      = sum(v[-lookback-1:-1]) / lookback
+    last_vol     = v[-1]
+    spike_ratio  = last_vol / (avg_vol + 1)
+    velocity     = abs(c[-1] - c[-3]) / c[-3] if c[-3] > 0 else 0.0
+    total_vol_5  = sum(v[-5:])
+    concentration = last_vol / (total_vol_5 + 1)
+    pnd = (c[-2] > c[-3] * 1.05) and (c[-1] < c[-2] * 0.98)
+    if spike_ratio > 5.0:
+        return {"organic": False, "reason": f"volume spike {spike_ratio:.1f}×"}
+    if velocity > 0.10:
+        return {"organic": False, "reason": f"velocity {velocity*100:.1f}%"}
+    if concentration > 0.65:
+        return {"organic": False, "reason": f"volume terkonsentrasi {concentration*100:.0f}%"}
+    if pnd:
+        return {"organic": False, "reason": "pump & dump pattern"}
+    return {"organic": True, "reason": "ok"}
+
+def score_signal(side: str, price: float, closes: list,
+                 highs: list, lows: list, volumes: list,
+                 structure: dict, rsi: float, macd: float, msig: float,
+                 ema20: float, ema50: float, regime: str,
+                 btc_4h: float = 0.0, fg: int = 50) -> float:
+    score = 0.0
+    if side == "BUY":
+        if ema20 > ema50 and price > ema20:  score += 1.0
+        elif ema20 > ema50:                   score += 0.5
+    else:
+        if ema20 < ema50 and price < ema20:  score += 1.0
+        elif ema20 < ema50:                   score += 0.5
+    if side == "BUY":
+        if macd > msig and macd > 0:  score += 1.0
+        elif macd > msig:              score += 0.5
+    else:
+        if macd < msig and macd < 0:  score += 1.0
+        elif macd < msig:              score += 0.5
+    avg_vol = sum(volumes[-11:-1]) / 10 if len(volumes) >= 11 else 0
+    if avg_vol > 0:
+        if volumes[-1] > avg_vol * 1.5:   score += 1.0
+        elif volumes[-1] > avg_vol * 1.2: score += 0.5
+    raw_bonus = 0.0
+    if side == "BUY" and 40 <= rsi <= 65:   raw_bonus += 0.3
+    elif side == "SELL" and 35 <= rsi <= 60: raw_bonus += 0.3
+    if side == "BUY" and btc_4h > 0:    raw_bonus += 0.3
+    elif side == "SELL" and btc_4h < 0: raw_bonus += 0.3
+    sh = structure.get("last_sh")
+    sl_lvl = structure.get("last_sl")
+    if sh and sl_lvl and (sh - sl_lvl) / sl_lvl > 0.02:
+        raw_bonus += 0.2
+    bonus   = min(raw_bonus, 0.5)
+    penalty = -0.5 if (fg < 20 or fg > 80) else 0.0
+    score  += bonus + penalty
+    if regime == "RANGING":
+        score *= 0.85
+    return round(score, 2)
+
+def calc_sl_tp_scan(entry: float, side: str, atr: float,
+                    structure: dict):
+    if side == "BUY":
+        last_sl = structure.get("last_sl")
+        if last_sl and last_sl < entry:
+            sl = last_sl - atr * ATR_SL_BUFFER
+        else:
+            sl = entry - atr * SL_ATR_MULT
+        sl = max(sl, entry * (1 - MAX_SL_PCT))
+        sl = min(sl, entry * (1 - MIN_SL_PCT))
+        sl_dist = entry - sl
+        tp1 = entry + sl_dist * TP1_R
+        tp2 = entry + sl_dist * TP2_R
+    else:
+        last_sh = structure.get("last_sh")
+        if last_sh and last_sh > entry:
+            sl = last_sh + atr * ATR_SL_BUFFER
+        else:
+            sl = entry + atr * SL_ATR_MULT
+        sl = min(sl, entry * (1 + MAX_SL_PCT))
+        sl = max(sl, entry * (1 + MIN_SL_PCT))
+        sl_dist = sl - entry
+        tp1 = entry - sl_dist * TP1_R
+        tp2 = entry - sl_dist * TP2_R
+    return round(sl, 8), round(tp1, 8), round(tp2, 8)
+
+def get_candles_scan(client, pair: str, interval: str = "1h",
+                     limit: int = 150):
+    global _CANDLE_FORMAT_LOGGED
+    try:
+        candles = client.list_candlesticks(pair, interval=interval, limit=limit)
+        if not candles or len(candles) < 10:
+            _track_api(True)
+            return None
+        if not _CANDLE_FORMAT_LOGGED:
+            log(f"[CANDLE FORMAT] {pair} len={len(candles[0])}")
+            _CANDLE_FORMAT_LOGGED = True
+        if len(candles[0]) < 6:
+            _track_api(False)
+            return None
+        closes  = [float(c[2]) for c in candles]
+        highs   = [float(c[3]) for c in candles]
+        lows    = [float(c[4]) for c in candles]
+        volumes = [float(c[1]) for c in candles]
+        _track_api(True)
+        return closes, highs, lows, volumes
+    except Exception as e:
+        log(f"   Candle error {pair}: {e}", "warn")
+        _track_api(False)
+        return None
+
+def get_all_pairs_scan(client) -> list:
+    try:
+        tickers = client.list_tickers()
+        EXCLUDED_SUFFIXES = [
+            "3L_USDT", "3S_USDT", "5L_USDT", "5S_USDT",
+            "2L_USDT", "2S_USDT", "UP_USDT", "DOWN_USDT", "ON_USDT",
+        ]
+        pairs_vol = []
+        for t in tickers:
+            try:
+                pair = str(t.currency_pair)
+                if not pair.endswith("_USDT"):
+                    continue
+                if any(pair.endswith(suf) for suf in EXCLUDED_SUFFIXES):
+                    continue
+                vol = float(t.quote_volume or 0)
+                if vol >= MIN_VOLUME_USDT:
+                    pairs_vol.append((pair, vol))
+            except Exception:
+                continue
+        pairs_vol.sort(key=lambda x: x[1], reverse=True)
+        _track_api(True)
+        return [p for p, _ in pairs_vol]
+    except Exception as e:
+        log(f"get_all_pairs error: {e}", "error")
+        _track_api(False)
+        return []
+
+def get_trending_pairs_scan(gate_pairs: list) -> list:
+    try:
+        req = urllib.request.Request(
+            "https://api.coingecko.com/api/v3/search/trending",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data     = json.loads(r.read())
+            coins    = data.get("coins", [])
+            gate_set = set(gate_pairs)
+            trending = []
+            for item in coins:
+                symbol = item.get("item", {}).get("symbol", "").upper()
+                pair   = f"{symbol}_USDT"
+                if pair in gate_set and pair not in trending:
+                    trending.append(pair)
+            if trending:
+                log(f"🔥 Trending: {', '.join(trending)}")
+            return trending
+    except Exception as e:
+        log(f"get_trending_pairs error: {e}", "warn")
+        return []
+
+def get_btc_regime_scan(client) -> dict:
+    data_1h = get_candles_scan(client, "BTC_USDT", "1h", 10)
+    data_4h = get_candles_scan(client, "BTC_USDT", "4h", BTC_TREND_LOOKBACK + 2)
+    btc_1h = btc_4h = 0.0
+    halt = block_buy = btc_bearish_trend = False
+    btc_bearish_cycles = 0
+    btc_volatile = False
+    btc_1h_range = 0.0
+    if data_1h:
+        closes = data_1h[0]
+        highs  = data_1h[1]
+        lows   = data_1h[2]
+        if len(closes) >= 2:
+            btc_1h = (closes[-1] - closes[-2]) / closes[-2] * 100
+        if highs and lows and closes:
+            btc_1h_range = (highs[-1] - lows[-1]) / closes[-1] * 100
+        if abs(btc_1h) >= BTC_VOLATILE_1H or btc_1h_range >= BTC_RANGE_1H:
+            btc_volatile = True
+        if btc_1h <= BTC_CRASH_BLOCK:
+            halt = True
+        elif btc_1h <= BTC_DROP_BLOCK:
+            block_buy = True
+    if data_4h:
+        closes = data_4h[0]
+        if len(closes) >= 2:
+            btc_4h = (closes[-1] - closes[-2]) / closes[-2] * 100
+        recent = closes[-BTC_TREND_LOOKBACK:]
+        bearish_count = sum(
+            1 for i in range(1, len(recent)) if recent[i] < recent[i-1]
+        )
+        btc_bearish_cycles = bearish_count
+        if bearish_count >= BTC_TREND_MIN_BEARISH:
+            btc_bearish_trend = True
+    return {
+        "btc_1h":             round(btc_1h, 2),
+        "btc_4h":             round(btc_4h, 2),
+        "btc_volatile":       btc_volatile,
+        "halt":               halt,
+        "block_buy":          block_buy,
+        "btc_bearish_trend":  btc_bearish_trend,
+        "btc_bearish_cycles": btc_bearish_cycles,
+    }
+
+def get_fear_greed_scan() -> int:
+    try:
+        req = urllib.request.Request(
+            "https://api.alternative.me/fng/?limit=1",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+            return int(data["data"][0]["value"])
+    except Exception as e:
+        log(f"get_fear_greed error: {e} — fallback 50", "warn")
+        return 50
+
+def get_pair_winrate_scan(pair: str) -> dict:
+    if supabase_signal is None:
+        return {"win_rate": -1, "total": 0}
+    try:
+        rows = (
+            supabase_signal.table("signals_v2")
+            .select("result")
+            .eq("pair", pair)
+            .not_.is_("result", "null")
+            .neq("result", "EXPIRED")
+            .execute()
+            .data
+        ) or []
+        WIN_RESULTS  = {"TP2", "TP1", "WIN", "PARTIAL_WIN", "SL_AFTER_TP1"}
+        wins   = sum(1 for r in rows if r.get("result") in WIN_RESULTS)
+        losses = sum(1 for r in rows if r.get("result") in {"SL", "LOSS", "EXPIRED_LOSS"})
+        total  = wins + losses
+        if total == 0:
+            return {"win_rate": -1, "total": 0}
+        return {"win_rate": round(wins / total * 100, 1), "total": total}
+    except Exception as e:
+        log(f"get_pair_winrate error ({pair}): {e}", "warn")
+        return {"win_rate": -1, "total": 0}
+
+def check_intraday_scan(client, pair: str, price: float,
+                         btc: dict, fg: int = 50) -> dict | None:
+    """Scan satu pair — return signal dict atau None."""
+    if btc.get("halt"):
+        return None
+    if btc.get("block_buy"):
+        return None
+    if btc.get("btc_bearish_trend"):
+        return None
+
+    data = get_candles_scan(client, pair, "1h", 150)
+    if data is None:
+        return None
+    closes, highs, lows, volumes = data
+
+    atr     = calc_atr(closes, highs, lows)
+    atr_pct = atr / price * 100
+    if atr_pct < 0.2 or atr_pct > 8.0:
+        return None
+
+    mkt = detect_regime(closes, highs, lows)
+    if mkt["regime"] == "CHOPPY":
+        return None
+
+    rsi        = calc_rsi(closes)
+    macd, msig = calc_macd(closes)
+    ema20      = calc_ema(closes, 20)
+    ema50      = calc_ema(closes, 50)
+    structure  = detect_structure(closes, highs, lows)
+
+    if not structure["valid"]:
+        return None
+    if rsi > 70:
+        return None
+
+    score = score_signal(
+        "BUY", price, closes, highs, lows, volumes,
+        structure, rsi, macd, msig, ema20, ema50,
+        mkt["regime"], btc.get("btc_4h", 0.0), fg
+    )
+    if score < MIN_SCORE:
+        return None
+
+    avg_vol = sum(volumes[-11:-1]) / 10 if len(volumes) >= 11 else 0
+    if avg_vol > 0 and volumes[-1] < avg_vol * 1.2:
+        return None
+
+    pump = is_organic_move(closes, volumes)
+    if not pump["organic"]:
+        log(f"      {pair} — pump filter: {pump['reason']}")
+        return None
+
+    accu = detect_accumulation(closes, highs, lows, volumes)
+    if accu["accumulating"]:
+        score = round(score + 0.3, 2)
+        log(f"      {pair} — akumulasi: OBV={accu['obv_slope']:+.2f} → score +0.3")
+
+    # 4h confirmation
+    data_4h = get_candles_scan(client, pair, "4h", 60)
+    if data_4h:
+        c4, h4, l4, _ = data_4h
+        ema20_4h = calc_ema(c4, 20)
+        ema50_4h = calc_ema(c4, 50)
+        macd_4h, msig_4h = calc_macd(c4)
+        if not (ema20_4h > ema50_4h and macd_4h > msig_4h):
+            return None
+
+    # WR-based threshold
+    wr_data = get_pair_winrate_scan(pair)
+    wr_pct  = wr_data.get("win_rate", -1)
+    wr_n    = wr_data.get("total", 0)
+    wr_adj  = 0.0
+    if wr_n >= 5:
+        if wr_pct <= 30:   wr_adj = +0.3
+        elif wr_pct >= 60: wr_adj = -0.2
+
+    bearish_cycles = btc.get("btc_bearish_cycles", 0)
+    adaptive_min   = MIN_SCORE + wr_adj + (0.5 if bearish_cycles >= 2 else 0.0)
+    if score < adaptive_min:
+        return None
+
+    last_sh = structure.get("last_sh")
+    entry   = round(last_sh * 1.002, 8) if (last_sh and price > last_sh) else price
+    dev     = abs(price - entry) / entry
+    if dev > MAX_ENTRY_DEV:
+        return None
+
+    sl, tp1, tp2 = calc_sl_tp_scan(entry, "BUY", atr, structure)
+
+    if tp1 <= entry or sl >= entry:
+        return None
+    sl_dist = entry - sl
+    if sl_dist <= 0:
+        return None
+    rr = abs(tp1 - entry) / sl_dist
+    if rr < MIN_RR:
+        return None
+
+    tier = "A+" if score >= 3.8 else "A" if score >= 3.5 else "B"
+
+    return {
+        "pair":    pair,
+        "side":    "BUY",
+        "entry":   entry,
+        "tp1":     tp1,
+        "tp2":     tp2,
+        "sl":      sl,
+        "score":   score,
+        "tier":    tier,
+        "rr":      round(rr, 1),
+        "rsi":     round(rsi, 1),
+        "regime":  mkt["regime"],
+        "adx":     mkt["adx"],
+    }
 
 # ════════════════════════════════════════════════════════
 #  GATE.IO CLIENT
@@ -833,7 +1383,7 @@ def evaluate_position(client, pos: dict, idr_rate: float) -> str:
 def execute_signal(client, sig: dict, equity: float,
                    open_pairs: set, idr_rate: float) -> bool:
     """
-    Eksekusi satu sinyal dari signals_v2.
+    Eksekusi satu sinyal dari integrated scanner.
     Return True jika berhasil entry, False jika skip.
     """
     pair      = sig["pair"]
@@ -843,7 +1393,6 @@ def execute_signal(client, sig: dict, equity: float,
     tp2_ref   = float(sig["tp2"] or 0)
     score     = float(sig.get("score") or 0)
     tier      = sig.get("tier") or "B"
-    signal_id = str(sig["id"])
 
     # Skip jika pair sudah punya posisi open
     if pair in open_pairs:
@@ -855,29 +1404,26 @@ def execute_signal(client, sig: dict, equity: float,
         log(f"   ⛔ {pair} — data sinyal tidak lengkap (entry/sl/tp kosong)")
         return False
 
-    # Ambil harga live dan cek apakah masih valid
+    # Ambil harga live
     live_price = get_ticker_price(client, pair)
     if live_price <= 0:
         log(f"   ⛔ {pair} — tidak bisa ambil harga live")
         return False
 
-    # Sinyal masih valid jika harga belum melebihi entry + 2% (slippage tolerance)
+    # Cek harga masih valid (tidak terlalu jauh dari entry)
     price_drift = abs(live_price - entry_ref) / entry_ref
     if live_price > entry_ref * 1.02:
-        log(f"   ⛔ {pair} — harga sudah naik {price_drift*100:.1f}% dari entry sinyal (skip)")
+        log(f"   ⛔ {pair} — harga sudah naik {price_drift*100:.1f}% dari entry (skip)")
         return False
     if live_price < sl_ref:
         log(f"   ⛔ {pair} — harga ${live_price:.4f} sudah di bawah SL ${sl_ref:.4f}")
         return False
 
-    # Hitung TP/SL dari harga live agar akurat
-    # Pertahankan jarak % dari sinyal asli, tapi base dari harga aktual
+    # Hitung TP/SL dari harga live
     sl_pct  = abs(entry_ref - sl_ref) / entry_ref
     tp1_pct = abs(tp1_ref - entry_ref) / entry_ref
     tp2_pct = abs(tp2_ref - entry_ref) / entry_ref
-
-    # Hitung RR dari data sinyal (tp2 vs sl)
-    rr = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 0.0
+    rr      = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 0.0
 
     sl_actual  = round(live_price * (1 - sl_pct), 8)
     tp1_actual = round(live_price * (1 + tp1_pct), 8)
@@ -917,7 +1463,7 @@ def execute_signal(client, sig: dict, equity: float,
         "tp1_price":  tp1_final,
         "tp2_price":  tp2_final,
         "tp1_hit":    False,
-        "signal_id":  signal_id,
+        "signal_id":  None,
         "notes":      f"Score:{score} RR:{rr} Tier:{tier}",
     })
 
@@ -934,7 +1480,7 @@ def execute_signal(client, sig: dict, equity: float,
         f"TP2 : <b>${tp2_final:,.4f}</b> (+{tp2_pct*100:.1f}%)\n"
         f"SL  : <b>${sl_final:,.4f}</b> (-{sl_pct*100:.1f}%) | RR: <b>1:{rr:.1f}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"Score  : {score} | Signal ID: #{signal_id}\n"
+        f"Score  : {score} | Regime: {sig.get('regime','?')} | ADX: {sig.get('adx','?')}\n"
         f"<i>⚠️ Bot akan jual otomatis di TP/SL.</i>"
     )
     log(f"🟢 BUY {pair} @ ${buy_price:.4f} | {filled} {currency} | "
@@ -1093,69 +1639,115 @@ def run():
         log(f"⏳ Cooldown aktif ({cooldown} cycle) — skip entry")
         return
 
-    if check_btc_crash(client):
+    # ── Step 5: Scan pair baru ────────────────────────────
+    log(f"\n── Scan pair baru (integrated scanner) ──")
+    now_wib_hour = datetime.now(WIB).hour
+    if now_wib_hour in BLOCK_HOURS_WIB:
+        log(f"⏸️  Jam {now_wib_hour:02d}:00 WIB masuk BLOCK_HOURS — scan dilewati")
+        tg(
+            f"⏸️ <b>Scan Dilewati</b>\n"
+            f"Jam {now_wib_hour:02d}:00 WIB — low WR hours (23:00–06:00 WIB).\n"
+            f"Bot aktif kembali pukul 07:00 WIB."
+        )
+        return
+
+    # BTC regime check
+    log("   Cek BTC regime...")
+    btc = get_btc_regime_scan(client)
+    log(f"   BTC 1h: {btc['btc_1h']:+.2f}% | 4h: {btc['btc_4h']:+.2f}% | "
+        f"Volatile: {btc['btc_volatile']} | Bearish trend: {btc['btc_bearish_trend']}")
+
+    if btc["halt"]:
+        log("🛑 BTC crash — scan dibatalkan")
         tg(
             f"🛑 <b>BTC Crash Detected</b>\n"
-            f"Drop > {abs(BTC_CRASH_THRESHOLD)}% dalam 1 jam.\n"
-            f"Entry altcoin diblokir sampai kondisi stabil."
+            f"BTC drop {btc['btc_1h']:+.2f}% dalam 1h.\n"
+            f"Scan dibatalkan sampai kondisi stabil."
         )
         return
 
-    # ── Step 5: Ambil sinyal baru dari Signal Bot ─────
-    log(f"\n── Cek sinyal baru dari Signal Bot ──")
-    signals = get_pending_signals()
+    if btc["block_buy"]:
+        log(f"⚠️ BTC drop {btc['btc_1h']:+.2f}% — BUY diblok")
 
-    if not signals:
-        log("📭 Tidak ada sinyal pending saat ini")
-        tg(
-            f"📭 <b>No Signal</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🕐 {now_wib.strftime('%H:%M WIB')}\n"
-            f"Signal Bot belum mengirim sinyal baru.\n"
-            f"Balance siap: <b>${balance:.2f}</b> | Slot: <b>{MAX_OPEN_POSITIONS - len(open_positions)}</b>"
-        )
+    fg = get_fear_greed_scan()
+    log(f"   Fear & Greed: {fg}")
+
+    # Ambil semua pair
+    all_pairs = get_all_pairs_scan(client)
+    log(f"   {len(all_pairs)} pair tersedia")
+
+    if not all_pairs:
+        log("⚠️ Tidak ada pair — scan dibatalkan", "warn")
         return
 
-    # Filter sinyal yang pairnya sudah open
-    new_signals = [s for s in signals if s["pair"] not in open_pairs]
-    log(f"   {len(new_signals)} sinyal valid (pair belum open)")
+    # Prioritaskan trending coins
+    trending = get_trending_pairs_scan(all_pairs)
+    if trending:
+        non_trending = [p for p in all_pairs if p not in trending]
+        all_pairs    = trending + non_trending
 
-    if not new_signals:
-        log("📭 Semua sinyal pair sudah punya posisi open")
-        tg(
-            f"📭 <b>No New Signal</b>\n"
-            f"Semua sinyal pair sudah punya posisi open."
-        )
+    if api_is_degraded():
+        log("⚠️ API degraded — scan dibatalkan", "warn")
         return
 
-    # ── Step 6: Eksekusi sinyal ───────────────────────
+    # Scan pair satu per satu
+    scanned      = 0
     entries_done = 0
     max_entries  = MAX_OPEN_POSITIONS - len(open_positions)
 
-    for sig in new_signals:
+    for pair in all_pairs:
         if entries_done >= max_entries:
-            log(f"⛔ Slot penuh — stop entry ({entries_done} dilakukan)")
+            break
+        if pair in open_pairs:
+            continue
+        if api_is_degraded():
+            log("⚠️ API degraded mid-scan — stop", "warn")
             break
 
-        # Refresh balance sebelum tiap entry
+        price = get_ticker_price(client, pair)
+        if price is None or price <= 0:
+            continue
+
+        scanned += 1
+
+        sig = check_intraday_scan(client, pair, price, btc, fg)
+        if sig is None:
+            time.sleep(0.3)
+            continue
+
+        log(f"   ✅ SIGNAL: {pair} score={sig['score']} tier={sig['tier']} "
+            f"rr={sig['rr']} entry=${sig['entry']:.4f}")
+
+        # Refresh balance sebelum entry
         balance = get_usdt_balance(client)
         if balance < MIN_ORDER_USDT:
             log(f"⚠️ Balance ${balance:.2f} tidak cukup — stop")
             tg(
                 f"⚠️ <b>Balance Tidak Cukup</b>\n"
                 f"Balance: <b>${balance:.2f}</b> | Min order: <b>${MIN_ORDER_USDT:.2f}</b>\n"
-                f"Bot tidak bisa entry — top up diperlukan."
+                f"Top up diperlukan."
             )
             break
 
-        log(f"\n   → Coba entry: {sig['pair']} | "
-            f"Score:{sig.get('score')} Tier:{sig.get('tier')}")
-
         ok = execute_signal(client, sig, balance, open_pairs, idr_rate)
         if ok:
-            entries_done  += 1
-            open_pairs.add(sig["pair"])
-            time.sleep(1)  # jeda antar entry
+            entries_done += 1
+            open_pairs.add(pair)
+            time.sleep(1)
+
+        time.sleep(0.3)
+
+    log(f"\n   Scan selesai — {scanned} pair diperiksa | {entries_done} entry baru")
+
+    if scanned > 0 and entries_done == 0:
+        tg(
+            f"📭 <b>No Signal</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 {now_wib.strftime('%H:%M WIB')}\n"
+            f"Scan {scanned} pair — tidak ada yang memenuhi kriteria.\n"
+            f"Balance siap: <b>${balance:.2f}</b> | Slot: <b>{max_entries}</b>\n"
+            f"F&G: {fg} | BTC 1h: {btc['btc_1h']:+.2f}%"
+        )
 
     log(f"\n{'='*55}")
     log(f"✅ Run selesai — {entries_done} entry baru | "
