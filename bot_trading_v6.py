@@ -68,7 +68,7 @@ RISK_PCT_FLOOR          = 0.03
 RISK_PCT_CAP            = 0.08
 EQUITY_LOOKBACK         = 5
 MIN_ORDER_USDT          = 10.0
-MAX_ORDER_USDT          = 15.0
+MAX_ORDER_USDT          = 12.0    # buffer untuk fee & reserved balance Gate.io
 
 # ── TP1 partial exit ─────────────────────────────────────
 TP1_SELL_RATIO          = 0.50
